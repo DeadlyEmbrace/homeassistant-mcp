@@ -16,8 +16,10 @@ RUN npm install
 # Build TypeScript
 RUN npm run build
 
-# Expose the port the app runs on
-EXPOSE 3000
+# Expose the port the app runs on (default 4000, configurable via PORT env var)
+ARG PORT=4000
+ENV PORT=${PORT}
+EXPOSE ${PORT}
 
 # Start the application
 CMD ["node", "dist/src/index.js"] 
