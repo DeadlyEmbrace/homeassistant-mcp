@@ -103,35 +103,7 @@ const MY_APP = CreateApplication<ApplicationConfiguration, {}>({
     }
   },
   libraries: [
-    {
-      ...LIB_HASS,
-      configuration: {
-        BASE_URL: {
-          type: "string",
-          description: "Home Assistant base URL",
-          required: false,
-          default: process.env.HASS_HOST || HASS_CONFIG.BASE_URL
-        },
-        TOKEN: {
-          type: "string",
-          description: "Home Assistant long-lived access token",
-          required: false,
-          default: process.env.HASS_TOKEN || HASS_CONFIG.TOKEN
-        },
-        SOCKET_URL: {
-          type: "string",
-          description: "Home Assistant WebSocket URL",
-          required: false,
-          default: process.env.HASS_SOCKET_URL || HASS_CONFIG.SOCKET_URL
-        },
-        SOCKET_TOKEN: {
-          type: "string",
-          description: "Home Assistant WebSocket token",
-          required: false,
-          default: process.env.HASS_TOKEN || HASS_CONFIG.SOCKET_TOKEN
-        }
-      }
-    }
+    LIB_HASS
   ],
   name: 'hass' as const
 });
@@ -421,9 +393,20 @@ let hassInstance: HassInstance | null = null;
 
 export async function get_hass(): Promise<HassInstance> {
   if (!hassInstance) {
-    // Safely get configuration keys, providing an empty object as fallback
-    const _sortedConfigKeys = Object.keys(MY_APP.configuration ?? {}).sort();
-    const instance = await MY_APP.bootstrap();
+    // Ensure environment variables are loaded
+    const hassHost = process.env.HASS_HOST || HASS_CONFIG.BASE_URL;
+    const hassToken = process.env.HASS_TOKEN || HASS_CONFIG.TOKEN;
+    
+    // Bootstrap with explicit configuration
+    const instance = await MY_APP.bootstrap({
+      configuration: {
+        // Override the @digital-alchemy defaults
+        hass: {
+          BASE_URL: hassHost,
+          TOKEN: hassToken
+        }
+      }
+    });
     hassInstance = instance as HassInstance;
   }
   return hassInstance;

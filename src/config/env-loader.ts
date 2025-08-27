@@ -22,17 +22,16 @@ export function loadEnvironmentVariables(): void {
   }
 
   // Ensure critical environment variables have valid values
-  // If HASS_HOST is not set or is the default homeassistant.local, override it
-  if (!process.env.HASS_HOST || process.env.HASS_HOST.includes('homeassistant.local')) {
-    const defaultHost = 'http://192.168.3.148:8123';
-    console.log(`HASS_HOST not set or invalid, using default: ${defaultHost}`);
-    process.env.HASS_HOST = defaultHost;
+  // Validate HASS_HOST is set
+  if (!process.env.HASS_HOST) {
+    console.error('ERROR: HASS_HOST environment variable is not set!');
+    console.error('Please set HASS_HOST to your Home Assistant instance URL');
+    throw new Error('HASS_HOST environment variable is required');
   }
 
   // Set WebSocket URL based on HASS_HOST if not already set
-  if (!process.env.HASS_SOCKET_URL) {
-    const host = process.env.HASS_HOST || 'http://192.168.3.148:8123';
-    const wsUrl = host.replace('http://', 'ws://').replace('https://', 'wss://') + '/api/websocket';
+  if (!process.env.HASS_SOCKET_URL && process.env.HASS_HOST) {
+    const wsUrl = process.env.HASS_HOST.replace('http://', 'ws://').replace('https://', 'wss://') + '/api/websocket';
     console.log(`HASS_SOCKET_URL not set, deriving from HASS_HOST: ${wsUrl}`);
     process.env.HASS_SOCKET_URL = wsUrl;
   }
