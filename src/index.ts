@@ -10,6 +10,7 @@ import { get_hass } from './hass/index.js';
 import { LiteMCP } from 'litemcp';
 import { z } from 'zod';
 import { DomainSchema } from './schemas.js';
+import { MCPHTTPTransport } from './mcp-http-transport.js';
 
 // Configuration (environment variables already loaded by env-loader)
 const HASS_HOST = process.env.HASS_HOST;
@@ -25,11 +26,15 @@ const app = express();
 app.use(securityHeaders);
 app.use(rateLimiter);
 app.use(express.json());
-app.use(validateRequest);
+// Remove global validateRequest - endpoints handle their own auth
+// app.use(validateRequest);
 app.use(sanitizeInput);
 
 // Initialize LiteMCP
 const server = new LiteMCP('home-assistant', '0.1.0');
+
+// Initialize HTTP MCP Transport
+const mcpHttpTransport = new MCPHTTPTransport(HASS_TOKEN!);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -50,6 +55,23 @@ interface Tool {
 
 // Array to track tools
 const tools: Tool[] = [];
+
+// Helper function to register tool with both transports
+function registerTool(tool: Tool) {
+  // Add to LiteMCP server
+  server.addTool(tool);
+  
+  // Track in our tools array
+  tools.push(tool);
+  
+  // Register with HTTP transport
+  mcpHttpTransport.registerTool(
+    tool.name,
+    tool.description,
+    tool.execute,
+    tool.parameters
+  );
+}
 
 // List devices endpoint
 app.get('/list_devices', async (req, res) => {
@@ -397,8 +419,7 @@ async function main() {
       }
     }
   };
-  server.addTool(listDevicesTool);
-  tools.push(listDevicesTool);
+  registerTool(listDevicesTool);
 
   // Add the Home Assistant control tool
   const controlTool = {
@@ -534,7 +555,7 @@ async function main() {
       }
     }
   };
-  server.addTool(controlTool);
+  registerTool(controlTool);
   tools.push(controlTool);
 
   // Add the history tool
@@ -587,7 +608,7 @@ async function main() {
       }
     },
   };
-  server.addTool(historyTool);
+  registerTool(historyTool);
   tools.push(historyTool);
 
   // Add the scenes tool
@@ -658,7 +679,7 @@ async function main() {
       }
     },
   };
-  server.addTool(sceneTool);
+  registerTool(sceneTool);
   tools.push(sceneTool);
 
   // Add the notification tool
@@ -705,7 +726,7 @@ async function main() {
       }
     },
   };
-  server.addTool(notifyTool);
+  registerTool(notifyTool);
   tools.push(notifyTool);
 
   // Add the automation tool
@@ -778,7 +799,7 @@ async function main() {
       }
     },
   };
-  server.addTool(automationTool);
+  registerTool(automationTool);
   tools.push(automationTool);
 
   // Add the addon tool
@@ -883,7 +904,7 @@ async function main() {
       }
     },
   };
-  server.addTool(addonTool);
+  registerTool(addonTool);
   tools.push(addonTool);
 
   // Add the package tool
@@ -970,7 +991,7 @@ async function main() {
       }
     },
   };
-  server.addTool(packageTool);
+  registerTool(packageTool);
   tools.push(packageTool);
 
   // Extend the automation tool with more functionality
@@ -1117,7 +1138,7 @@ async function main() {
       }
     },
   };
-  server.addTool(automationConfigTool);
+  registerTool(automationConfigTool);
   tools.push(automationConfigTool);
 
   // Add SSE endpoint
@@ -1200,7 +1221,7 @@ async function main() {
       };
     }
   };
-  server.addTool(subscribeEventsTool);
+  registerTool(subscribeEventsTool);
   tools.push(subscribeEventsTool);
 
   // Add statistics endpoint
@@ -1224,10 +1245,14 @@ async function main() {
       };
     }
   };
-  server.addTool(getSSEStatsTool);
+  registerTool(getSSEStatsTool);
   tools.push(getSSEStatsTool);
 
   logger.debug('[server:init]', 'Initializing MCP Server...');
+
+  // Setup HTTP MCP transport routes
+  mcpHttpTransport.setupRoutes(app);
+  logger.info('[server:init]', 'HTTP MCP transport initialized at /mcp endpoint');
 
   // Start the server
   await server.start();
@@ -1252,6 +1277,12 @@ async function main() {
   logger.info('[server:endpoints]', '\n- /get_sse_stats');
   logger.info('[server:endpoints]', '  Parameters:');
   logger.info('[server:endpoints]', '  - token: Authentication token (required)');
+  
+  // Log MCP HTTP endpoints
+  logger.info('[server:endpoints]', '\nMCP HTTP Transport Endpoints (for n8n):');
+  logger.info('[server:endpoints]', '- POST /mcp - MCP protocol endpoint');
+  logger.info('[server:endpoints]', '- GET /mcp/tools - List available MCP tools');
+  logger.info('[server:endpoints]', '- GET /mcp/health - MCP transport health check');
 
   // Log successful initialization
   logger.info('[server:init]', '\nServer initialization complete. Ready to handle requests.');

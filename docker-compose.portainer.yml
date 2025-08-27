@@ -8,12 +8,23 @@ services:
     ports:
       - "${PORT:-4000}:${PORT:-4000}"
     environment:
-      - NODE_ENV=production
-      - HASS_HOST=${HASS_HOST:-http://192.168.3.148:8123}
+      # REQUIRED - Must be set via environment variables or .env file
+      - HASS_HOST=${HASS_HOST}
       - HASS_TOKEN=${HASS_TOKEN}
+      
+      # Optional - Will be auto-generated from HASS_HOST if not provided
+      - HASS_SOCKET_URL=${HASS_SOCKET_URL}
+      
+      # Optional with defaults
+      - NODE_ENV=${NODE_ENV:-production}
       - PORT=${PORT:-4000}
-      - HASS_SOCKET_URL=${HASS_SOCKET_URL:-ws://192.168.3.148:8123/api/websocket}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     env_file:
       - .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-4000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

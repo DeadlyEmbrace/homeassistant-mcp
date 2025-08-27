@@ -127,8 +127,9 @@ export class TokenManager {
 
 // Request validation middleware
 export function validateRequest(req: Request, res: Response, next: NextFunction) {
-    // Skip validation for health endpoint
-    if (req.path === '/health') {
+    // Skip validation for public endpoints
+    const publicPaths = ['/health', '/mcp/health'];
+    if (publicPaths.includes(req.path)) {
         return next();
     }
 
@@ -139,9 +140,11 @@ export function validateRequest(req: Request, res: Response, next: NextFunction)
         });
     }
 
-    // Validate token
+    // Validate token - Home Assistant uses simple bearer tokens, not JWTs
     const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token || !TokenManager.validateToken(token)) {
+    const hassToken = process.env.HASS_TOKEN;
+    
+    if (!token || !hassToken || token !== hassToken) {
         return res.status(401).json({
             error: 'Invalid or expired token'
         });

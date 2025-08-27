@@ -52,6 +52,9 @@ See [SSE_API.md](docs/SSE_API.md) for complete documentation of the SSE system.
   - [Basic Setup](#basic-setup)
   - [Docker Setup (Recommended)](#docker-setup-recommended)
 - [Configuration](#configuration)
+- [MCP Integration](#mcp-integration)
+  - [Claude Desktop](#claude-desktop)
+  - [n8n Workflows](#n8n-workflows)
 - [Development](#development)
 - [API Reference](#api-reference)
   - [Device Control](#device-control)
@@ -154,6 +157,11 @@ npm run build
 
 The project includes Docker support for easy deployment and consistent environments across different platforms.
 
+#### ⚠️ IMPORTANT: Environment Variable Requirements
+
+**The `HASS_HOST` environment variable is REQUIRED and must be set to your actual Home Assistant instance URL.**  
+The application will NOT start without this variable properly configured.
+
 1. **Clone the repository:**
     ```bash
     git clone https://github.com/jango-blockchained/homeassistant-mcp.git
@@ -166,21 +174,30 @@ The project includes Docker support for easy deployment and consistent environme
     ```
     Edit the `.env` file with your Home Assistant configuration:
     ```env
-    # Home Assistant Configuration
-    HASS_HOST=http://homeassistant.local:8123
+    # REQUIRED - Replace with your actual Home Assistant URL
+    HASS_HOST=http://192.168.1.100:8123  # DO NOT use homeassistant.local
+    
+    # REQUIRED - Your Home Assistant long-lived access token
     HASS_TOKEN=your_home_assistant_token
-    HASS_SOCKET_URL=ws://homeassistant.local:8123/api/websocket
-
+    
+    # Optional - WebSocket URL (auto-generated from HASS_HOST if not provided)
+    # HASS_SOCKET_URL=ws://192.168.1.100:8123/api/websocket
+    
     # Server Configuration
-    PORT=3000
+    PORT=4000
     NODE_ENV=production
-    DEBUG=false
+    LOG_LEVEL=info
     ```
+    
+    **Note:** Always use IP addresses or fully qualified domain names. Avoid using `.local` domains as they may not resolve properly in Docker containers.
 
 3. **Build and run with Docker Compose:**
     ```bash
-    # Build and start the containers
-    docker compose up -d
+    # For standard Docker Compose
+    docker compose up -d --build
+    
+    # For Portainer deployment
+    docker compose -f docker-compose.portainer.yml up -d --build
 
     # View logs
     docker compose logs -f
@@ -190,7 +207,7 @@ The project includes Docker support for easy deployment and consistent environme
     ```
 
 4. **Verify the installation:**
-    The server should now be running at `http://localhost:3000`. You can check the health endpoint at `http://localhost:3000/health`.
+    The server should now be running at `http://localhost:4000`. You can check the health endpoint at `http://localhost:4000/health`.
 
 5. **Update the application:**
     ```bash
@@ -206,39 +223,67 @@ The project includes Docker support for easy deployment and consistent environme
 The Docker setup includes:
 - Multi-stage build for optimal image size
 - Health checks for container monitoring
-- Volume mounting for environment configuration
+- Environment variable validation (fails fast if HASS_HOST is not set)
 - Automatic container restart on failure
-- Exposed port 3000 for API access
+- Exposed port 4000 for API access (configurable via PORT env var)
 
 #### Docker Compose Environment Variables
 
-All environment variables can be configured in the `.env` file. The following variables are supported:
-- `HASS_HOST`: Your Home Assistant instance URL
-- `HASS_TOKEN`: Long-lived access token for Home Assistant
-- `HASS_SOCKET_URL`: WebSocket URL for Home Assistant
-- `PORT`: Server port (default: 3000)
-- `NODE_ENV`: Environment (production/development)
-- `DEBUG`: Enable debug mode (true/false)
+The following environment variables must be configured:
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `HASS_HOST` | **Yes** | Your Home Assistant instance URL | `http://192.168.1.100:8123` |
+| `HASS_TOKEN` | **Yes** | Long-lived access token for Home Assistant | `eyJ0eXAiOi...` |
+| `HASS_SOCKET_URL` | No | WebSocket URL (auto-generated if not set) | `ws://192.168.1.100:8123/api/websocket` |
+| `PORT` | No | Server port (default: 4000) | `4000` |
+| `NODE_ENV` | No | Environment (default: production) | `production` |
+| `LOG_LEVEL` | No | Log verbosity (default: info) | `debug`, `info`, `warn`, `error` |
+
+#### Portainer Stack Deployment
+
+For Portainer users, use the provided `docker-compose.portainer.yml` file:
+
+1. In Portainer, go to **Stacks** → **Add stack**
+2. Name your stack (e.g., `homeassistant-mcp`)
+3. **Build method**: Upload or paste the `docker-compose.portainer.yml` content
+4. **Environment variables**: Add the required variables in the Portainer UI:
+   ```
+   HASS_HOST=http://192.168.1.100:8123
+   HASS_TOKEN=your_token_here
+   PORT=4000
+   ```
+5. **Deploy the stack**
+
+⚠️ **Common Docker Issues:**
+- If you see `ENOTFOUND homeassistant.local`, ensure `HASS_HOST` is set to an IP address
+- If the container fails to start, check that `HASS_HOST` and `HASS_TOKEN` are properly set
+- Use `docker logs <container_name>` to view detailed error messages
 
 ## Configuration
 
 ### Environment Variables
 
 ```env
-# Home Assistant Configuration
-HASS_HOST=http://homeassistant.local:8123  # Your Home Assistant instance URL
+# REQUIRED Configuration
+HASS_HOST=http://192.168.1.100:8123        # Your Home Assistant instance URL (use IP address)
 HASS_TOKEN=your_home_assistant_token       # Long-lived access token
-HASS_SOCKET_URL=ws://homeassistant.local:8123/api/websocket  # WebSocket URL
 
-# Server Configuration
-PORT=3000                # Server port (default: 3000)
+# Optional Configuration
+HASS_SOCKET_URL=ws://192.168.1.100:8123/api/websocket  # WebSocket URL (auto-generated if not set)
+PORT=4000                # Server port (default: 4000)
 NODE_ENV=production     # Environment (production/development)
-DEBUG=false            # Enable debug mode
+LOG_LEVEL=info         # Log verbosity (debug/info/warn/error)
 
 # Test Configuration
 TEST_HASS_HOST=http://localhost:8123  # Test instance URL
 TEST_HASS_TOKEN=test_token           # Test token
 ```
+
+**Important Notes:**
+- Always use IP addresses instead of `.local` domains in Docker environments
+- `HASS_HOST` is required - the application will not start without it
+- `HASS_SOCKET_URL` is automatically derived from `HASS_HOST` if not provided
 
 ### Configuration Files
 
@@ -246,27 +291,69 @@ TEST_HASS_TOKEN=test_token           # Test token
 2. **Production**: Copy `.env.example` to `.env.production`
 3. **Testing**: Copy `.env.example` to `.env.test`
 
-### Adding to Claude Desktop (or other clients)
+## MCP Integration
 
-To use your new Home Assistant MCP server, you can add Claude Desktop as a client. Add the following to the configuration. Note this will run the MCP within claude and does not work with the Docker method.
+This server supports multiple MCP client integrations:
 
-```
+### Claude Desktop
+
+To use with Claude Desktop, add the following to your configuration file:
+
+**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`  
+**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
 {
-  "homeassistant": {
-    "command": "node",
-    "args": [<path/to/your/dist/folder>]
-    "env": {
-      NODE_ENV=development
-      HASS_HOST=http://homeassistant.local:8123
-      HASS_TOKEN=your_home_assistant_token
-      PORT=3000
-      HASS_SOCKET_URL=ws://homeassistant.local:8123/api/websocket
-      LOG_LEVEL=debug
+  "mcpServers": {
+    "homeassistant": {
+      "command": "node",
+      "args": ["/path/to/homeassistant-mcp/dist/src/index.js"],
+      "env": {
+        "NODE_ENV": "production",
+        "HASS_HOST": "http://192.168.1.100:8123",
+        "HASS_TOKEN": "your_home_assistant_token",
+        "PORT": "4000",
+        "LOG_LEVEL": "info"
+      }
     }
   }
 }
-
 ```
+
+### n8n Workflows
+
+This server includes HTTP-based MCP transport for integration with n8n workflows.
+
+**MCP Endpoint**: `http://192.168.3.148:4000/mcp`
+
+Key features for n8n:
+- ✅ **Authentication**: Bearer token authentication
+- ✅ **Tool Discovery**: List all available MCP tools via `tools/list` method
+- ✅ **Tool Execution**: Execute any MCP tool via `tools/call` method
+- ✅ **JSON-RPC 2.0**: Standard protocol for easy integration
+
+Quick example for n8n HTTP Request node:
+```json
+{
+  "url": "http://192.168.3.148:4000/mcp",
+  "method": "POST",
+  "headers": {
+    "Authorization": "Bearer YOUR_HASS_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/list",
+    "params": {}
+  }
+}
+```
+
+**Documentation:**
+- 📖 [HTTP Transport Documentation](docs/MCP_HTTP_TRANSPORT.md) - Complete protocol reference
+- 🔧 [n8n Setup Guide](docs/N8N_SETUP_GUIDE.md) - Step-by-step integration instructions
+- 🚀 [n8n Examples](docs/N8N_MCP_INTEGRATION.md) - Advanced workflow examples
 
 
 
@@ -689,17 +776,48 @@ npm run format
    - Validate token permissions
    - Ensure WebSocket connection for real-time updates
 
-3. **Add-on Management Issues**
+3. **Docker-Specific Issues**
+
+   **Error: `ENOTFOUND homeassistant.local`**
+   - **Cause:** Docker containers cannot resolve `.local` domains
+   - **Solution:** Use IP address instead of `homeassistant.local`
+   ```env
+   # Wrong
+   HASS_HOST=http://homeassistant.local:8123
+   
+   # Correct
+   HASS_HOST=http://192.168.1.100:8123
+   ```
+
+   **Error: `HASS_HOST environment variable is required`**
+   - **Cause:** Missing required environment variable
+   - **Solution:** Ensure `HASS_HOST` is set in your `.env` file or docker-compose environment
+
+   **Container fails with exit code 2**
+   - **Cause:** npm install failure during build
+   - **Solution:** 
+     - Ensure package.json doesn't specify conflicting package managers
+     - Clear Docker build cache: `docker compose build --no-cache`
+     - Check Docker logs: `docker logs <container_name>`
+
+   **Cannot connect to Home Assistant from container**
+   - **Cause:** Network isolation or incorrect URL
+   - **Solution:**
+     - Use host IP address, not `localhost` or `127.0.0.1`
+     - Ensure container and Home Assistant are on same network
+     - Check firewall rules
+
+4. **Add-on Management Issues**
    - Verify Supervisor access
    - Check add-on compatibility
    - Validate system resources
 
-4. **HACS Integration Issues**
+5. **HACS Integration Issues**
    - Verify HACS installation
    - Check HACS integration status
    - Validate repository access
 
-5. **Automation Issues**
+6. **Automation Issues**
    - Verify entity availability
    - Check trigger conditions
    - Validate service calls
