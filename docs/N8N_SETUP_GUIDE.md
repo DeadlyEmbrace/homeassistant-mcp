@@ -3,11 +3,12 @@
 ## Table of Contents
 1. [Prerequisites](#prerequisites)
 2. [Initial Setup](#initial-setup)
-3. [Creating Credentials](#creating-credentials)
-4. [Building Your First Workflow](#building-your-first-workflow)
-5. [Common Workflow Patterns](#common-workflow-patterns)
-6. [Advanced Examples](#advanced-examples)
-7. [Troubleshooting](#troubleshooting)
+3. [Using MCP Client (STDIO) API Action](#using-mcp-client-stdio-api-action)
+4. [Creating Credentials (HTTP Method)](#creating-credentials-http-method)
+5. [Building Your First Workflow](#building-your-first-workflow)
+6. [Common Workflow Patterns](#common-workflow-patterns)
+7. [Advanced Examples](#advanced-examples)
+8. [Troubleshooting](#troubleshooting)
 
 ## Prerequisites
 
@@ -48,7 +49,170 @@ curl -X GET http://YOUR_SERVER_IP:4000/mcp/tools \
   -H "Authorization: Bearer YOUR_HASS_TOKEN"
 ```
 
-## Creating Credentials
+## Using MCP Client (STDIO) API Action
+
+### Overview
+
+The **MCP Client (STDIO) API** action in n8n provides a direct way to interact with MCP servers using the STDIO (Standard Input/Output) transport protocol. This is the recommended method for integrating with this Home Assistant MCP server.
+
+### Step 1: Add MCP Client Node to Workflow
+
+1. In your n8n workflow, click the **+** button to add a new node
+2. Search for "MCP" in the node search
+3. Select **"MCP Client (STDIO) API"**
+4. The node will be added to your workflow
+
+### Step 2: Configure Server Connection
+
+1. **Server Command**: Enter the command to start the MCP server:
+   ```bash
+   node /path/to/homeassistant-mcp/dist/src/index.js
+   ```
+   
+   **For Docker installations**, use:
+   ```bash
+   docker exec homeassistant-mcp node dist/src/index.js
+   ```
+
+2. **Environment Variables** (Important!):
+   - Click **"Add Environment Variable"**
+   - Add the following variables:
+     ```
+     HASS_HOST=http://YOUR_HOMEASSISTANT_IP:8123
+     HASS_TOKEN=YOUR_LONG_LIVED_ACCESS_TOKEN
+     ```
+
+3. **Working Directory** (Optional):
+   - Set to the directory containing your MCP server
+   - Example: `/app` (for Docker) or `/path/to/homeassistant-mcp`
+
+### Step 3: Configure the Action
+
+1. **Operation**: Select the operation you want to perform:
+   - **List Tools**: Get all available MCP tools
+   - **Call Tool**: Execute a specific MCP tool
+   - **Get Completions**: Get autocomplete suggestions
+
+2. **For Tool Calls**, configure:
+   - **Tool Name**: Select or enter the tool name (e.g., `list_devices`, `control`, `get_states`)
+   - **Arguments**: Provide tool arguments as JSON object
+
+### Step 4: Example Configurations
+
+#### List All Available Tools
+```json
+{
+  "operation": "list_tools"
+}
+```
+
+#### Control a Light
+```json
+{
+  "operation": "call_tool",
+  "tool_name": "control",
+  "arguments": {
+    "command": "turn_on",
+    "entity_id": "light.living_room",
+    "brightness": 128
+  }
+}
+```
+
+#### Get Device States
+```json
+{
+  "operation": "call_tool",
+  "tool_name": "get_states",
+  "arguments": {
+    "entity_ids": ["light.living_room", "switch.coffee_maker"]
+  }
+}
+```
+
+### Step 5: Handle Responses
+
+The MCP Client node returns responses in MCP format. Use a **Code** node to process the response:
+
+```javascript
+// Process MCP response
+const response = $input.first().json;
+
+// Check for errors
+if (response.error) {
+  throw new Error(`MCP Error: ${response.error.message}`);
+}
+
+// Extract result
+const result = response.result;
+
+// For tool calls, extract content
+if (result.content && result.content[0]) {
+  const content = result.content[0].text;
+  
+  // Try to parse JSON response
+  try {
+    const data = JSON.parse(content);
+    return [{ json: data }];
+  } catch {
+    return [{ json: { text: content } }];
+  }
+}
+
+return [{ json: result }];
+```
+
+### Advantages of STDIO Method
+
+- **Direct Integration**: Native n8n support for MCP protocol
+- **Better Performance**: No HTTP overhead
+- **Automatic Connection Management**: n8n handles process lifecycle
+- **Built-in Error Handling**: Native support for MCP error responses
+- **Type Safety**: Better parameter validation
+
+### Troubleshooting STDIO Method
+
+#### Common Issues:
+
+1. **Command Not Found**:
+   - Ensure Node.js is installed on n8n server
+   - Verify the path to your MCP server is correct
+   - For Docker: ensure container is running
+
+2. **Environment Variables Not Set**:
+   - Check HASS_HOST and HASS_TOKEN are correctly configured
+   - Verify Home Assistant is accessible from n8n server
+
+3. **Permission Errors**:
+   - Ensure n8n has execute permissions for the MCP server
+   - Check file ownership and permissions
+
+4. **Connection Timeout**:
+   - Verify Home Assistant is running and accessible
+   - Check network connectivity between n8n and Home Assistant
+   - Increase timeout in n8n node settings if needed
+
+### Quick Test for STDIO Method
+
+Create a simple test workflow:
+
+1. **Manual Trigger Node**
+2. **MCP Client (STDIO) API Node**:
+   - **Server Command**: `node /path/to/homeassistant-mcp/dist/src/index.js`
+   - **Environment Variables**: Your HASS_HOST and HASS_TOKEN
+   - **Operation**: List Tools
+3. **Code Node** to display results:
+   ```javascript
+   const response = $input.first().json;
+   console.log('MCP Response:', response);
+   return [{ json: response }];
+   ```
+
+If this works, you'll see the list of available tools in the workflow output.
+
+## Creating Credentials (HTTP Method)
+
+> **Note**: This section covers the HTTP method as an alternative to the STDIO method above.
 
 ### Step 1: Create HTTP Header Auth Credential
 
@@ -71,10 +235,78 @@ For reusability, create an n8n variable:
 
 ## Building Your First Workflow
 
-### Basic Workflow: List All Tools
+### Method 1: Using MCP Client (STDIO) - Recommended
+
+#### Basic Workflow: List All Tools
 
 1. **Create New Workflow**
    - Name: "MCP Tool Discovery"
+
+2. **Add Manual Trigger Node** (for testing)
+
+3. **Add MCP Client (STDIO) API Node**
+   - **Server Command**: `node /path/to/homeassistant-mcp/dist/src/index.js`
+   - **Environment Variables**:
+     ```
+     HASS_HOST=http://YOUR_HOMEASSISTANT_IP:8123
+     HASS_TOKEN=YOUR_LONG_LIVED_ACCESS_TOKEN
+     ```
+   - **Operation**: List Tools
+
+4. **Add Code Node** (to process response)
+   ```javascript
+   const tools = $input.first().json.result.tools;
+   return tools.map(tool => ({
+     json: {
+       name: tool.name,
+       description: tool.description
+     }
+   }));
+   ```
+
+5. **Save and Execute**
+
+#### Control a Light Workflow
+
+1. **Create New Workflow**
+   - Name: "Home Assistant Light Control"
+
+2. **Add Manual Trigger Node**
+
+3. **Add MCP Client (STDIO) API Node**
+   - **Server Command**: `node /path/to/homeassistant-mcp/dist/src/index.js`
+   - **Environment Variables**: (same as above)
+   - **Operation**: Call Tool
+   - **Tool Name**: `control`
+   - **Arguments**:
+     ```json
+     {
+       "command": "turn_on",
+       "entity_id": "light.living_room",
+       "brightness": 128
+     }
+     ```
+
+4. **Add Code Node** (to process response)
+   ```javascript
+   const response = $input.first().json;
+   if (response.error) {
+     throw new Error(`Failed to control light: ${response.error.message}`);
+   }
+   return [{ 
+     json: { 
+       success: true, 
+       message: "Light controlled successfully" 
+     } 
+   }];
+   ```
+
+### Method 2: Using HTTP Requests (Alternative)
+
+#### Basic Workflow: List All Tools
+
+1. **Create New Workflow**
+   - Name: "MCP Tool Discovery (HTTP)"
 
 2. **Add HTTP Request Node**
    - **Method**: POST
@@ -105,10 +337,10 @@ For reusability, create an n8n variable:
 
 4. **Save and Execute**
 
-### Workflow: Control a Light
+#### Control a Light Workflow (HTTP Method)
 
 1. **Create New Workflow**
-   - Name: "Home Assistant Light Control"
+   - Name: "Home Assistant Light Control (HTTP)"
 
 2. **Add Manual Trigger** (for testing)
 
@@ -135,6 +367,8 @@ For reusability, create an n8n variable:
      ```
 
 ## Common Workflow Patterns
+
+> **Note**: The examples below show both STDIO and HTTP methods. Choose the method that works best for your setup.
 
 ### Pattern 1: Time-Based Automation
 
