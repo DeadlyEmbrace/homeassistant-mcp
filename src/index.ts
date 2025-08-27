@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { sseManager } from './sse/index.js';
 import { ILogger } from "@digital-alchemy/core";
 import express from 'express';
-import { rateLimiter, securityHeaders, validateRequest, sanitizeInput, errorHandler } from './security/index.js';
+import { rateLimiter, securityHeaders, corsMiddleware, validateRequest, sanitizeInput, errorHandler } from './security/index.js';
 
 import { get_hass } from './hass/index.js';
 import { LiteMCP } from 'litemcp';
@@ -29,6 +29,7 @@ console.log('Initializing Home Assistant connection...');
 const app = express();
 
 // Apply security middleware
+app.use(corsMiddleware);
 app.use(securityHeaders);
 app.use(rateLimiter);
 app.use(express.json());

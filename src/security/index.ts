@@ -3,6 +3,7 @@ import { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { HelmetOptions } from 'helmet';
+import cors from 'cors';
 
 // Security configuration
 const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
@@ -41,6 +42,15 @@ const helmetConfig: HelmetOptions = {
 
 // Security headers middleware
 export const securityHeaders = helmet(helmetConfig);
+
+// CORS middleware configuration
+export const corsMiddleware = cors({
+    origin: true, // Allow all origins for MCP client compatibility
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    credentials: false,
+    optionsSuccessStatus: 200
+});
 
 // Token validation and encryption
 export class TokenManager {
@@ -182,6 +192,7 @@ export function errorHandler(err: Error, req: Request, res: Response, next: Next
 
 // Export security middleware chain
 export const securityMiddleware = [
+    corsMiddleware,
     helmet(helmetConfig),
     rateLimit({
         windowMs: 15 * 60 * 1000,
