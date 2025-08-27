@@ -13,7 +13,6 @@
     "test:watch": "NODE_OPTIONS=--experimental-vm-modules jest --config=jest.config.cjs --watch",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
-    "prepare": "npm run build",
     "clean": "rimraf dist",
     "types:check": "tsc --noEmit",
     "types:install": "npm install --save-dev @types/node @types/jest"
