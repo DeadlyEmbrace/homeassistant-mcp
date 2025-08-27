@@ -1,29 +1,18 @@
 import './polyfills.js';
-import { config } from 'dotenv';
-import { resolve } from 'path';
+import './config/env-loader.js';  // Load environment variables first
 import { v4 as uuidv4 } from 'uuid';
 import { sseManager } from './sse/index.js';
 import { ILogger } from "@digital-alchemy/core";
 import express from 'express';
 import { rateLimiter, securityHeaders, validateRequest, sanitizeInput, errorHandler } from './security/index.js';
 
-// Load environment variables based on NODE_ENV
-const envFile = process.env.NODE_ENV === 'production'
-  ? '.env'
-  : process.env.NODE_ENV === 'test'
-    ? '.env.test'
-    : '.env.development';
-
-console.log(`Loading environment from ${envFile}`);
-config({ path: resolve(process.cwd(), envFile) });
-
 import { get_hass } from './hass/index.js';
 import { LiteMCP } from 'litemcp';
 import { z } from 'zod';
 import { DomainSchema } from './schemas.js';
 
-// Configuration
-const HASS_HOST = process.env.HASS_HOST || 'http://192.168.178.63:8123';
+// Configuration (environment variables already loaded by env-loader)
+const HASS_HOST = process.env.HASS_HOST;
 const HASS_TOKEN = process.env.HASS_TOKEN;
 const PORT = process.env.PORT || 3000;
 

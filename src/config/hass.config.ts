@@ -1,7 +1,5 @@
-import dotenv from 'dotenv';
-
-// Load environment variables
-dotenv.config();
+// Import env-loader to ensure environment variables are loaded
+import './env-loader.js';
 
 export const HASS_CONFIG = {
     BASE_URL: process.env.HASS_HOST || 'http://192.168.3.148:8123',

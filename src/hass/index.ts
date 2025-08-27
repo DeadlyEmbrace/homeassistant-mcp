@@ -1,3 +1,4 @@
+import '../config/env-loader.js';  // Ensure environment variables are loaded first
 import { CreateApplication, TServiceParams, ServiceFunction, AlsExtension, GetApisResult, ILogger, InternalDefinition, TContext, TInjectedConfig, TLifecycleBase, TScheduler } from "@digital-alchemy/core";
 import { Area, Backup, CallProxy, Configure, Device, EntityManager, EventsService, FetchAPI, FetchInternals, Floor, IDByExtension, Label, LIB_HASS, ReferenceService, Registry, WebsocketAPI, Zone } from "@digital-alchemy/hass";
 import { DomainSchema } from "../schemas.js";
@@ -108,26 +109,26 @@ const MY_APP = CreateApplication<ApplicationConfiguration, {}>({
         BASE_URL: {
           type: "string",
           description: "Home Assistant base URL",
-          required: true,
-          default: HASS_CONFIG.BASE_URL
+          required: false,
+          default: process.env.HASS_HOST || HASS_CONFIG.BASE_URL
         },
         TOKEN: {
           type: "string",
           description: "Home Assistant long-lived access token",
-          required: true,
-          default: HASS_CONFIG.TOKEN
+          required: false,
+          default: process.env.HASS_TOKEN || HASS_CONFIG.TOKEN
         },
         SOCKET_URL: {
           type: "string",
           description: "Home Assistant WebSocket URL",
-          required: true,
-          default: HASS_CONFIG.SOCKET_URL
+          required: false,
+          default: process.env.HASS_SOCKET_URL || HASS_CONFIG.SOCKET_URL
         },
         SOCKET_TOKEN: {
           type: "string",
           description: "Home Assistant WebSocket token",
-          required: true,
-          default: HASS_CONFIG.SOCKET_TOKEN
+          required: false,
+          default: process.env.HASS_TOKEN || HASS_CONFIG.SOCKET_TOKEN
         }
       }
     }

@@ -8,8 +8,10 @@ yarn-error.log
 dist
 
 # Environment files
-.env*
-!.env.example
+# Note: We don't exclude .env files since docker-compose needs them
+# .env files will be loaded from environment variables passed by docker-compose
+.env.local
+.env.*.local
 
 # Git
 .git

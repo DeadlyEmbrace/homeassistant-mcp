@@ -7,11 +7,15 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 # Set working directory
 WORKDIR /app
 
-# Copy source code first
-COPY . .
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
 
 # Install dependencies
 RUN npm install
+
+# Copy source code
+COPY src ./src
 
 # Build TypeScript
 RUN npm run build
