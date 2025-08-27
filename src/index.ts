@@ -15,7 +15,13 @@ import { MCPHTTPTransport } from './mcp-http-transport.js';
 // Configuration (environment variables already loaded by env-loader)
 const HASS_HOST = process.env.HASS_HOST;
 const HASS_TOKEN = process.env.HASS_TOKEN;
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
+
+// Validate required environment variables
+if (!HASS_TOKEN) {
+  console.error('ERROR: HASS_TOKEN environment variable is required for HTTP MCP transport');
+  process.exit(1);
+}
 
 console.log('Initializing Home Assistant connection...');
 
@@ -34,7 +40,7 @@ app.use(sanitizeInput);
 const server = new LiteMCP('home-assistant', '0.1.0');
 
 // Initialize HTTP MCP Transport
-const mcpHttpTransport = new MCPHTTPTransport(HASS_TOKEN!);
+const mcpHttpTransport = new MCPHTTPTransport(HASS_TOKEN);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
