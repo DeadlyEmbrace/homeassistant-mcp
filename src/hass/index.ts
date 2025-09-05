@@ -397,17 +397,41 @@ export async function get_hass(): Promise<HassInstance> {
     const hassHost = process.env.HASS_HOST || HASS_CONFIG.BASE_URL;
     const hassToken = process.env.HASS_TOKEN || HASS_CONFIG.TOKEN;
     
-    // Bootstrap with explicit configuration
-    const instance = await MY_APP.bootstrap({
-      configuration: {
-        // Override the @digital-alchemy defaults
-        hass: {
-          BASE_URL: hassHost,
-          TOKEN: hassToken
+    // Temporarily suppress all console output during bootstrap
+    const originalConsole = {
+      log: console.log,
+      info: console.info,
+      warn: console.warn,
+      error: console.error,
+      debug: console.debug
+    };
+    
+    console.log = () => {};
+    console.info = () => {};
+    console.warn = () => {};
+    console.error = () => {};
+    console.debug = () => {};
+    
+    try {
+      // Bootstrap with explicit configuration
+      const instance = await MY_APP.bootstrap({
+        configuration: {
+          // Override the @digital-alchemy defaults
+          hass: {
+            BASE_URL: hassHost,
+            TOKEN: hassToken
+          }
         }
-      }
-    });
-    hassInstance = instance as HassInstance;
+      });
+      hassInstance = instance as HassInstance;
+    } finally {
+      // Restore console methods
+      console.log = originalConsole.log;
+      console.info = originalConsole.info;
+      console.warn = originalConsole.warn;
+      console.error = originalConsole.error;
+      console.debug = originalConsole.debug;
+    }
   }
   return hassInstance;
 }

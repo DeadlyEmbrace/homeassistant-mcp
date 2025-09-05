@@ -93,7 +93,7 @@ export class MCPHTTPTransport {
           };
         }
       } catch (error) {
-        console.warn(`Could not convert schema for tool ${name}:`, error);
+  // ...existing code...
       }
     }
 
@@ -111,14 +111,7 @@ export class MCPHTTPTransport {
     const authHeader = req.headers.authorization;
     const token = authHeader?.replace('Bearer ', '');
 
-    // Debug logging
-    console.log('[MCP-HTTP] Auth Debug:', {
-      hasAuthHeader: !!authHeader,
-      receivedTokenLength: token?.length || 0,
-      expectedTokenLength: this.token?.length || 0,
-      tokensMatch: token === this.token,
-      timestamp: new Date().toISOString()
-    });
+  // ...existing code...
 
     if (!token || token !== this.token) {
       const response: MCPResponse = {

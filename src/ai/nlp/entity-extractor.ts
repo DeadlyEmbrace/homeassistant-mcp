@@ -57,7 +57,7 @@ export class EntityExtractor {
 
             return entities;
         } catch (error) {
-            console.error('Entity extraction error:', error);
+            // ...existing code...
             return {
                 primary_target: '',
                 parameters: {},

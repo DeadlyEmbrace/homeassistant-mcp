@@ -56,7 +56,7 @@ class MacOSIntegration extends EventEmitter {
 
             return this.permissions;
         } catch (error) {
-            console.error('Error checking permissions:', error);
+            // ...existing code...
             return this.permissions;
         }
     }
@@ -75,7 +75,7 @@ class MacOSIntegration extends EventEmitter {
         try {
             await execAsync(`osascript -e '${script}'`);
         } catch (error) {
-            console.error('Error sending notification:', error);
+            // ...existing code...
             throw error;
         }
     }
@@ -115,7 +115,7 @@ class MacOSIntegration extends EventEmitter {
             const events = stdout.split(',').map(e => e.trim());
             events.forEach(event => this.emit('system_event', event));
         } catch (error) {
-            console.error('Error monitoring system events:', error);
+            // ...existing code...
         }
     }
 
@@ -128,7 +128,7 @@ class MacOSIntegration extends EventEmitter {
             const { stdout } = await execAsync(`osascript -e '${script}'`);
             return stdout;
         } catch (error) {
-            console.error('Error executing automation:', error);
+            // ...existing code...
             throw error;
         }
     }
@@ -155,7 +155,7 @@ class MacOSIntegration extends EventEmitter {
 
             return info;
         } catch (error) {
-            console.error('Error getting system info:', error);
+            // ...existing code...
             throw error;
         }
     }

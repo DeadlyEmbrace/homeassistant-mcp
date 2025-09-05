@@ -34,7 +34,7 @@ export class SSEManager extends EventEmitter {
 
     private constructor() {
         super();
-        console.log('Initializing SSE Manager...');
+    // ...existing code...
         this.startMaintenanceInterval();
     }
 
@@ -51,7 +51,7 @@ export class SSEManager extends EventEmitter {
         for (const [clientId, client] of this.clients.entries()) {
             // Remove inactive clients
             if (now - client.lastPing > this.CLIENT_TIMEOUT) {
-                console.log(`Removing inactive client: ${clientId}`);
+                // ...existing code...
                 this.removeClient(clientId);
                 continue;
             }
@@ -64,7 +64,7 @@ export class SSEManager extends EventEmitter {
         }
 
         // Log statistics
-        console.log(`Maintenance complete - Active clients: ${this.clients.size}`);
+    // console.error(`Maintenance complete - Active clients: ${this.clients.size}`); // Suppressed for clean output
     }
 
     static getInstance(): SSEManager {
@@ -77,7 +77,7 @@ export class SSEManager extends EventEmitter {
     addClient(client: { id: string; send: (data: string) => void }, token?: string): SSEClient | null {
         // Check maximum client limit
         if (this.clients.size >= this.MAX_CLIENTS) {
-            console.warn('Maximum client limit reached, rejecting new connection');
+            // ...existing code...
             return null;
         }
 
@@ -100,7 +100,7 @@ export class SSEManager extends EventEmitter {
         };
 
         this.clients.set(client.id, sseClient);
-        console.log(`SSE client connected: ${client.id} (authenticated: ${sseClient.authenticated})`);
+    // ...existing code...
 
         // Start ping interval for this client
         this.startClientPing(client.id);
@@ -135,7 +135,7 @@ export class SSEManager extends EventEmitter {
     removeClient(clientId: string) {
         if (this.clients.has(clientId)) {
             this.clients.delete(clientId);
-            console.log(`SSE client disconnected: ${clientId}`);
+            // ...existing code...
         }
     }
 
@@ -143,7 +143,7 @@ export class SSEManager extends EventEmitter {
         const client = this.clients.get(clientId);
         if (client?.authenticated) {
             client.subscriptions.entities.add(entityId);
-            console.log(`Client ${clientId} subscribed to entity: ${entityId}`);
+            // ...existing code...
 
             // Send current state if available
             const currentState = this.entityStates.get(entityId);
@@ -166,7 +166,7 @@ export class SSEManager extends EventEmitter {
         const client = this.clients.get(clientId);
         if (client?.authenticated) {
             client.subscriptions.domains.add(domain);
-            console.log(`Client ${clientId} subscribed to domain: ${domain}`);
+            // ...existing code...
         }
     }
 
@@ -174,7 +174,7 @@ export class SSEManager extends EventEmitter {
         const client = this.clients.get(clientId);
         if (client?.authenticated) {
             client.subscriptions.events.add(eventType);
-            console.log(`Client ${clientId} subscribed to event: ${eventType}`);
+            // ...existing code...
         }
     }
 
@@ -195,7 +195,7 @@ export class SSEManager extends EventEmitter {
             timestamp: new Date().toISOString()
         };
 
-        console.log(`Broadcasting state change for ${entity.entity_id}`);
+    // ...existing code...
 
         // Send to relevant subscribers only
         for (const client of this.clients.values()) {
@@ -221,7 +221,7 @@ export class SSEManager extends EventEmitter {
             timestamp: new Date().toISOString()
         };
 
-        console.log(`Broadcasting event: ${event.event_type}`);
+    // ...existing code...
 
         // Send to relevant subscribers only
         for (const client of this.clients.values()) {
@@ -243,7 +243,7 @@ export class SSEManager extends EventEmitter {
             }
 
             if (client.rateLimit.count >= this.RATE_LIMIT_MAX_REQUESTS) {
-                console.warn(`Rate limit exceeded for client ${client.id}`);
+                // ...existing code...
                 this.sendToClient(client, {
                     type: 'error',
                     error: 'rate_limit_exceeded',
@@ -257,7 +257,7 @@ export class SSEManager extends EventEmitter {
             client.lastPing = now;
             client.send(JSON.stringify(data));
         } catch (error) {
-            console.error(`Error sending message to client ${client.id}:`, error);
+            // ...existing code...
             this.removeClient(client.id);
         }
     }
