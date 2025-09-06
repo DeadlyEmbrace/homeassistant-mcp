@@ -19,6 +19,7 @@ A powerful bridge between your Home Assistant instance and Language Learning Mod
 - 📊 **State Monitoring**: Track and query device states
 - 🔐 **Secure**: Token-based authentication and rate limiting
 - 📱 **Mobile Ready**: Works with any HTTP-capable client
+- 📝 **Error Logging**: Comprehensive error logging to files with automatic rotation
 
 ## Real-time Updates with SSE
 

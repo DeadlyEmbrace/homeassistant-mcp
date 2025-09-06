@@ -6,6 +6,7 @@ import { HASS_CONFIG } from "../config/hass.config.js";
 import { WebSocket } from 'ws';
 import { EventEmitter } from 'events';
 import * as HomeAssistant from '../types/hass.js';
+import { logger } from '../utils/logger.js';
 
 type Environments = "development" | "production" | "test";
 
@@ -413,6 +414,13 @@ export async function get_hass(): Promise<HassInstance> {
     console.debug = () => {};
     
     try {
+      // Log the connection attempt
+      await logger.info('Attempting to connect to Home Assistant', {
+        hassHost,
+        hassToken: hassToken ? 'present' : 'missing',
+        timestamp: new Date().toISOString()
+      });
+
       // Bootstrap with explicit configuration
       const instance = await MY_APP.bootstrap({
         configuration: {
@@ -424,6 +432,22 @@ export async function get_hass(): Promise<HassInstance> {
         }
       });
       hassInstance = instance as HassInstance;
+
+      // Log successful connection
+      await logger.info('Successfully connected to Home Assistant', {
+        hassHost,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      // Log the connection error
+      await logger.error('Failed to bootstrap Home Assistant connection', error instanceof Error ? error : new Error(String(error)), {
+        hassHost,
+        hassToken: hassToken ? 'present' : 'missing',
+        timestamp: new Date().toISOString()
+      });
+      
+      // Re-throw the error so main() can handle it
+      throw error;
     } finally {
       // Restore console methods
       console.log = originalConsole.log;

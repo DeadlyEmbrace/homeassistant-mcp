@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { NLPProcessor } from '../nlp/processor.js';
 import { AIRateLimit, AIContext, AIResponse, AIError, AIModel } from '../types/index.js';
 import rateLimit from 'express-rate-limit';
+import { logger } from '../../utils/logger.js';
 
 const router = express.Router();
 const nlpProcessor = new NLPProcessor();
@@ -61,6 +62,15 @@ const errorHandler = (
     res: express.Response,
     next: express.NextFunction
 ) => {
+    logger.error('AI Router error', error, {
+        endpoint: req.path,
+        method: req.method,
+        input: req.body.input,
+        context: req.body.context,
+        model: req.body.model,
+        timestamp: new Date().toISOString()
+    });
+
     const aiError: AIError = {
         code: 'PROCESSING_ERROR',
         message: error.message,

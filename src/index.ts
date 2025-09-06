@@ -15,6 +15,7 @@ import { sseManager } from './sse/index.js';
 import { ILogger } from "@digital-alchemy/core";
 import express from 'express';
 import { rateLimiter, securityHeaders, corsMiddleware, validateRequest, sanitizeInput, errorHandler } from './security/index.js';
+import { logger } from './utils/logger.js';
 
 import { get_hass } from './hass/index.js';
 import { LiteMCP } from 'litemcp';
@@ -26,12 +27,6 @@ import { MCPHTTPTransport } from './mcp-http-transport.js';
 const HASS_HOST = process.env.HASS_HOST;
 const HASS_TOKEN = process.env.HASS_TOKEN;
 const PORT = process.env.PORT || 4000;
-
-// Validate required environment variables
-if (!HASS_TOKEN) {
-  // ...existing code...
-  process.exit(1);
-}
 // ...existing code...
 
 // Initialize Express app
@@ -49,8 +44,11 @@ app.use(sanitizeInput);
 // Initialize LiteMCP
 const server = new LiteMCP('home-assistant', '0.1.0');
 
-// Initialize HTTP MCP Transport
-const mcpHttpTransport = new MCPHTTPTransport(HASS_TOKEN);
+// Initialize HTTP MCP Transport (will be properly set up in main())
+let mcpHttpTransport: MCPHTTPTransport;
+
+// Initialize it immediately with empty token, will be reset in main()
+mcpHttpTransport = new MCPHTTPTransport('');
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -113,6 +111,13 @@ app.get('/list_devices', async (req, res) => {
     const result = await tool.execute({ token });
     res.json(result);
   } catch (error) {
+    logger.error('Error in /list_devices endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/list_devices',
+      method: 'GET',
+      hasToken: !!req.headers.authorization,
+      timestamp: new Date().toISOString()
+    });
+    
     res.status(500).json({
       success: false,
       message: error instanceof Error ? error.message : 'Unknown error occurred'
@@ -146,6 +151,14 @@ app.post('/control', async (req, res) => {
     });
     res.json(result);
   } catch (error) {
+    logger.error('Error in /control endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/control',
+      method: 'POST',
+      hasToken: !!req.headers.authorization,
+      requestBody: req.body,
+      timestamp: new Date().toISOString()
+    });
+    
     res.status(500).json({
       success: false,
       message: error instanceof Error ? error.message : 'Unknown error occurred'
@@ -212,6 +225,13 @@ app.get('/get_sse_stats', async (req, res) => {
     const result = await tool.execute({ token });
     res.json(result);
   } catch (error) {
+    logger.error('Error in /sse_stats endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/sse_stats',
+      method: 'GET',
+      hasToken: !!req.query.token,
+      timestamp: new Date().toISOString()
+    });
+    
     res.status(500).json({
       success: false,
       message: error instanceof Error ? error.message : 'Unknown error occurred'
@@ -390,7 +410,43 @@ interface AutomationConfigParams {
 }
 
 async function main() {
-  const hass = await get_hass();
+  // Validate required environment variables first
+  if (!HASS_TOKEN) {
+    await logger.error('Application startup failed: Missing HASS_TOKEN', new Error('HASS_TOKEN environment variable is required'), {
+      hassHost: HASS_HOST,
+      port: PORT,
+      timestamp: new Date().toISOString()
+    });
+    process.exit(1);
+  }
+
+  // Log application startup
+  await logger.info('Home Assistant MCP Server starting up', {
+    version: '0.1.0',
+    nodeVersion: process.version,
+    platform: process.platform,
+    hassHost: HASS_HOST,
+    port: PORT,
+    timestamp: new Date().toISOString()
+  });
+
+  // Reinitialize MCP transport with valid token
+  mcpHttpTransport = new MCPHTTPTransport(HASS_TOKEN);
+
+  let hass;
+  try {
+    hass = await get_hass();
+    await logger.info('Home Assistant connection established', {
+      hassHost: HASS_HOST,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    await logger.error('Failed to connect to Home Assistant', error instanceof Error ? error : new Error(String(error)), {
+      hassHost: HASS_HOST,
+      timestamp: new Date().toISOString()
+    });
+    process.exit(1);
+  }
   // ...existing code...
 
   // Add the list devices tool
@@ -1267,11 +1323,35 @@ async function main() {
   // ...existing code...
 
   // Setup HTTP MCP transport routes
-  mcpHttpTransport.setupRoutes(app);
-  // ...existing code...
+  try {
+    mcpHttpTransport.setupRoutes(app);
+    await logger.info('MCP HTTP transport routes configured', {
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    await logger.error('Failed to setup MCP HTTP transport routes', error instanceof Error ? error : new Error(String(error)), {
+      timestamp: new Date().toISOString()
+    });
+    throw error;
+  }
 
   // Start the server
-  await server.start();
+  try {
+    await server.start();
+    
+    // Log MCP server startup
+    await logger.info('MCP Protocol Server initialized', {
+      tools_registered: tools.length,
+      tool_names: tools.map(t => t.name),
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    await logger.error('Failed to start MCP Protocol Server', error instanceof Error ? error : new Error(String(error)), {
+      tools_registered: tools.length,
+      timestamp: new Date().toISOString()
+    });
+    throw error;
+  }
   // ...existing code...
   // ...existing code...
   // ...existing code...
@@ -1302,15 +1382,49 @@ async function main() {
   // ...existing code...
 
   // Start the Express server with error handling
-  const httpServer = app.listen(PORT, () => {
-    // Server started successfully - no output to avoid breaking MCP protocol
-  });
+  try {
+    await logger.info('Starting Express HTTP server', {
+      port: PORT,
+      timestamp: new Date().toISOString()
+    });
+
+    const httpServer = app.listen(PORT, async () => {
+      // Server started successfully - log to file instead of console to avoid breaking MCP protocol
+      await logger.info('Home Assistant MCP Server started successfully', {
+        port: PORT,
+        host: HASS_HOST,
+        mcp_version: '0.1.0',
+        endpoints: [
+          '/health',
+          '/list_devices', 
+          '/control',
+          '/subscribe_events',
+          '/sse_stats',
+          '/mcp/initialize',
+          '/mcp/ping',
+          '/mcp/tools/list',
+          '/mcp/tools/call'
+        ],
+        timestamp: new Date().toISOString()
+      });
+    });
 
   // Handle server errors (like port already in use)
   httpServer.on('error', (err: any) => {
+    logger.error('HTTP Server error', err, {
+      port: PORT,
+      timestamp: new Date().toISOString()
+    });
+
     if (err.code === 'EADDRINUSE') {
       // Port is busy - try to find an available port
       const altPort = parseInt(PORT.toString()) + Math.floor(Math.random() * 1000) + 1;
+      logger.info('Port in use, trying alternative port', {
+        originalPort: PORT,
+        alternativePort: altPort,
+        timestamp: new Date().toISOString()
+      });
+      
       app.listen(altPort, () => {
         // Alternative port used - no output to avoid breaking MCP protocol
       });
@@ -1319,6 +1433,34 @@ async function main() {
       process.exit(1);
     }
   });
+  } catch (error) {
+    await logger.error('Failed to start Express HTTP server', error instanceof Error ? error : new Error(String(error)), {
+      port: PORT,
+      timestamp: new Date().toISOString()
+    });
+    process.exit(1);
+  }
 }
 
-main();
+main().catch(error => {
+  logger.error('Fatal error in main function', error, {
+    timestamp: new Date().toISOString()
+  });
+  process.exit(1);
+});
+
+// Global error handlers
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught Exception', error, {
+    timestamp: new Date().toISOString()
+  });
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Promise Rejection', reason instanceof Error ? reason : new Error(String(reason)), {
+    promise: promise.toString(),
+    timestamp: new Date().toISOString()
+  });
+  process.exit(1);
+});

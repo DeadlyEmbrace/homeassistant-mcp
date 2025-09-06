@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import { logger } from './utils/logger.js';
 
 // MCP Protocol message types
 interface MCPRequest {
@@ -183,6 +184,13 @@ export class MCPHTTPTransport {
 
       res.json(response);
     } catch (error) {
+      logger.error('MCP HTTP Transport error', error instanceof Error ? error : new Error(String(error)), {
+        mcpMethod: request.method,
+        requestId: request.id,
+        params: request.params,
+        timestamp: new Date().toISOString()
+      });
+      
       const response: MCPResponse = {
         jsonrpc: '2.0',
         id: request.id,

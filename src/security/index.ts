@@ -4,6 +4,7 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { HelmetOptions } from 'helmet';
 import cors from 'cors';
+import { logger } from '../utils/logger.js';
 
 // Security configuration
 const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
@@ -183,7 +184,18 @@ export function sanitizeInput(req: Request, res: Response, next: NextFunction) {
 
 // Error handling middleware
 export function errorHandler(err: Error, req: Request, res: Response, next: NextFunction) {
-    // ...existing code...
+    // Log error to file with request context
+    logger.error('HTTP Error occurred', err, {
+        url: req.url,
+        method: req.method,
+        userAgent: req.get('User-Agent'),
+        ip: req.ip,
+        timestamp: new Date().toISOString(),
+        body: req.body,
+        params: req.params,
+        query: req.query
+    });
+
     res.status(500).json({
         error: 'Internal Server Error',
         message: process.env.NODE_ENV === 'development' ? err.message : undefined
