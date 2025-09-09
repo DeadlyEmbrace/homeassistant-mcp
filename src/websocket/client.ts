@@ -159,6 +159,46 @@ export class HassWebSocketClient extends EventEmitter {
         });
     }
 
+    public async callWS(message: any): Promise<any> {
+        if (!this.authenticated) {
+            throw new Error('Not authenticated');
+        }
+
+        const id = this.messageId++;
+        const requestMessage = { id, ...message };
+
+        return new Promise((resolve, reject) => {
+            this.send(requestMessage);
+
+            this.once(`result_${id}`, (response) => {
+                if (response.success) {
+                    resolve(response.result);
+                } else {
+                    reject(new Error(response.error?.message || 'WebSocket command failed'));
+                }
+            });
+        });
+    }
+
+    public async getAutomationConfig(entityId: string): Promise<any> {
+        return this.callWS({
+            type: 'automation/config',
+            entity_id: entityId
+        });
+    }
+
+    public async getConfig(): Promise<any> {
+        return this.callWS({
+            type: 'get_config'
+        });
+    }
+
+    public async getStates(): Promise<any> {
+        return this.callWS({
+            type: 'get_states'
+        });
+    }
+
     private send(message: any): void {
         if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(message));

@@ -101,6 +101,7 @@ interface TestResponse {
     packages?: unknown[];
     automation_id?: string;
     new_automation_id?: string;
+    automation_config?: unknown;
 }
 
 type WebSocketEventMap = {
@@ -726,13 +727,17 @@ describe('Home Assistant MCP Server', () => {
                     entity_id: 'automation.morning_routine',
                     name: 'Morning Routine',
                     state: 'on',
-                    last_triggered: '2024-01-01T07:00:00Z'
+                    last_triggered: '2024-01-01T07:00:00Z',
+                    description: null,
+                    mode: null
                 },
                 {
                     entity_id: 'automation.night_mode',
                     name: 'Night Mode',
                     state: 'off',
-                    last_triggered: '2024-01-01T22:00:00Z'
+                    last_triggered: '2024-01-01T22:00:00Z',
+                    description: null,
+                    mode: null
                 }
             ]);
         });
@@ -823,6 +828,93 @@ describe('Home Assistant MCP Server', () => {
 
             expect(result.success).toBe(false);
             expect(result.message).toBe('Automation ID is required for toggle and trigger actions');
+        });
+
+        it('should successfully get automation configuration', async () => {
+            const mockConfig = {
+                alias: 'Morning Routine',
+                description: 'Turn on lights at sunrise',
+                mode: 'single',
+                trigger: [{
+                    platform: 'sun',
+                    event: 'sunrise'
+                }],
+                condition: [{
+                    condition: 'time',
+                    after: '06:00:00'
+                }],
+                action: [{
+                    service: 'light.turn_on',
+                    target: {
+                        entity_id: 'light.living_room'
+                    }
+                }]
+            };
+
+            mockFetch.mockResolvedValueOnce({
+                ok: true,
+                json: async () => mockConfig
+            } as Response);
+
+            const automationTool = addToolCalls.find(call => call[0].name === 'automation')?.[0];
+            expect(automationTool).toBeDefined();
+
+            if (!automationTool) {
+                throw new Error('automation tool not found');
+            }
+
+            const result = (await automationTool.execute({
+                action: 'get_config',
+                automation_id: 'automation.morning_routine'
+            })) as TestResponse;
+
+            expect(result.success).toBe(true);
+            expect(result.automation_config).toEqual({
+                entity_id: 'automation.morning_routine',
+                alias: 'Morning Routine',
+                description: 'Turn on lights at sunrise',
+                mode: 'single',
+                trigger: [{
+                    platform: 'sun',
+                    event: 'sunrise'
+                }],
+                condition: [{
+                    condition: 'time',
+                    after: '06:00:00'
+                }],
+                action: [{
+                    service: 'light.turn_on',
+                    target: {
+                        entity_id: 'light.living_room'
+                    }
+                }]
+            });
+
+            expect(mockFetch).toHaveBeenCalledWith(
+                `${TEST_HASS_HOST}/api/config/automation/config/automation.morning_routine`,
+                {
+                    headers: {
+                        Authorization: `Bearer ${TEST_HASS_TOKEN}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+        });
+
+        it('should require automation_id for get_config action', async () => {
+            const automationTool = addToolCalls.find(call => call[0].name === 'automation')?.[0];
+            expect(automationTool).toBeDefined();
+
+            if (!automationTool) {
+                throw new Error('automation tool not found');
+            }
+
+            const result = (await automationTool.execute({
+                action: 'get_config'
+            })) as TestResponse;
+
+            expect(result.success).toBe(false);
+            expect(result.message).toBe('Automation ID is required for get_config action');
         });
     });
 

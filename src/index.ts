@@ -16,6 +16,7 @@ import { ILogger } from "@digital-alchemy/core";
 import express from 'express';
 import { rateLimiter, securityHeaders, corsMiddleware, validateRequest, sanitizeInput, errorHandler } from './security/index.js';
 import { logger } from './utils/logger.js';
+import { HassWebSocketClient } from './websocket/client.js';
 
 import { get_hass } from './hass/index.js';
 import { LiteMCP } from 'litemcp';
@@ -153,6 +154,167 @@ app.post('/control', async (req, res) => {
   } catch (error) {
     logger.error('Error in /control endpoint', error instanceof Error ? error : new Error(String(error)), {
       endpoint: '/control',
+      method: 'POST',
+      hasToken: !!req.headers.authorization,
+      requestBody: req.body,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    });
+  }
+});
+
+// Automation endpoints
+app.get('/automations', async (req, res) => {
+  try {
+    // Get token from Authorization header
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token || token !== HASS_TOKEN) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Invalid token'
+      });
+    }
+
+    const tool = tools.find(t => t.name === 'automation');
+    if (!tool) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tool not found'
+      });
+    }
+
+    const result = await tool.execute({ action: 'list' });
+    res.json(result);
+  } catch (error) {
+    logger.error('Error in /automations endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/automations',
+      method: 'GET',
+      hasToken: !!req.headers.authorization,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    });
+  }
+});
+
+app.get('/automations/:automation_id/config', async (req, res) => {
+  try {
+    // Get token from Authorization header
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token || token !== HASS_TOKEN) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Invalid token'
+      });
+    }
+
+    const tool = tools.find(t => t.name === 'automation');
+    if (!tool) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tool not found'
+      });
+    }
+
+    const result = await tool.execute({ 
+      action: 'get_config', 
+      automation_id: req.params.automation_id 
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error('Error in /automations/:automation_id/config endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/automations/:automation_id/config',
+      method: 'GET',
+      hasToken: !!req.headers.authorization,
+      automationId: req.params.automation_id,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    });
+  }
+});
+
+app.get('/automations/:automation_id/yaml', async (req, res) => {
+  try {
+    // Get token from Authorization header
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token || token !== HASS_TOKEN) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Invalid token'
+      });
+    }
+
+    const tool = tools.find(t => t.name === 'automation');
+    if (!tool) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tool not found'
+      });
+    }
+
+    const result = await tool.execute({ 
+      action: 'get_yaml', 
+      automation_id: req.params.automation_id 
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error('Error in /automations/:automation_id/yaml endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/automations/:automation_id/yaml',
+      method: 'GET',
+      hasToken: !!req.headers.authorization,
+      automationId: req.params.automation_id,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    });
+  }
+});
+
+app.post('/automations', async (req, res) => {
+  try {
+    // Get token from Authorization header
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token || token !== HASS_TOKEN) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Invalid token'
+      });
+    }
+
+    const tool = tools.find(t => t.name === 'automation');
+    if (!tool) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tool not found'
+      });
+    }
+
+    const result = await tool.execute({
+      ...req.body,
+      token
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error('Error in /automations endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/automations',
       method: 'POST',
       hasToken: !!req.headers.authorization,
       requestBody: req.body,
@@ -379,7 +541,7 @@ interface NotifyParams {
 }
 
 interface AutomationParams {
-  action: 'list' | 'toggle' | 'trigger';
+  action: 'list' | 'toggle' | 'trigger' | 'get_config' | 'get_yaml';
   automation_id?: string;
 }
 
@@ -434,12 +596,36 @@ async function main() {
   mcpHttpTransport = new MCPHTTPTransport(HASS_TOKEN);
 
   let hass;
+  let wsClient: HassWebSocketClient | null = null;
+  
   try {
     hass = await get_hass();
     await logger.info('Home Assistant connection established', {
       hassHost: HASS_HOST,
       timestamp: new Date().toISOString()
     });
+
+    // Initialize WebSocket client
+    try {
+      const wsUrl = HASS_HOST?.replace(/^http/, 'ws') + '/api/websocket';
+      wsClient = new HassWebSocketClient(wsUrl, HASS_TOKEN!, {
+        autoReconnect: true,
+        maxReconnectAttempts: 5,
+        reconnectDelay: 1000
+      });
+      
+      await wsClient.connect();
+      await logger.info('WebSocket connection established', {
+        wsUrl,
+        timestamp: new Date().toISOString()
+      });
+    } catch (wsError) {
+      await logger.warn('WebSocket connection failed, continuing with REST API only', {
+        error: wsError instanceof Error ? wsError.message : String(wsError),
+        timestamp: new Date().toISOString()
+      });
+      wsClient = null;
+    }
   } catch (error) {
     await logger.error('Failed to connect to Home Assistant', error instanceof Error ? error : new Error(String(error)), {
       hassHost: HASS_HOST,
@@ -806,8 +992,8 @@ async function main() {
     name: 'automation',
     description: 'Manage Home Assistant automations',
     parameters: z.object({
-      action: z.enum(['list', 'toggle', 'trigger']).describe('Action to perform with automation'),
-      automation_id: z.string().optional().describe('Automation ID (required for toggle and trigger actions)'),
+      action: z.enum(['list', 'toggle', 'trigger', 'get_config', 'get_yaml']).describe('Action to perform with automation'),
+      automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_config, and get_yaml actions)'),
     }),
     execute: async (params: AutomationParams) => {
       try {
@@ -833,11 +1019,288 @@ async function main() {
               name: automation.attributes.friendly_name || automation.entity_id.split('.')[1],
               state: automation.state,
               last_triggered: automation.attributes.last_triggered,
+              description: automation.attributes.description || null,
+              mode: automation.attributes.mode || null,
             })),
+          };
+        } else if (params.action === 'get_config') {
+          if (!params.automation_id) {
+            throw new Error('Automation ID is required for get_config action');
+          }
+
+          // First, try WebSocket API for automation config
+          if (wsClient) {
+            try {
+              const wsConfig = await wsClient.getAutomationConfig(params.automation_id);
+              if (wsConfig && wsConfig.config) {
+                return {
+                  success: true,
+                  automation_config: {
+                    entity_id: params.automation_id,
+                    alias: wsConfig.config.alias,
+                    description: wsConfig.config.description || null,
+                    mode: wsConfig.config.mode || 'single',
+                    trigger: wsConfig.config.trigger,
+                    condition: wsConfig.config.condition || [],
+                    action: wsConfig.config.action,
+                  },
+                  source: 'websocket_api'
+                };
+              }
+            } catch (wsError) {
+              // WebSocket API failed, continue with other methods
+            }
+          }
+
+          // Get the automation state with attributes which might contain more details
+          const stateResponse = await fetch(`${HASS_HOST}/api/states/${params.automation_id}`, {
+            headers: {
+              Authorization: `Bearer ${HASS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+          });
+
+          if (!stateResponse.ok) {
+            throw new Error(`Failed to get automation state: ${stateResponse.status} ${stateResponse.statusText}`);
+          }
+
+          const stateData = await stateResponse.json() as HassState;
+
+          // Try to get detailed configuration from the config API
+          // Extract automation ID - if it starts with 'automation.', remove that prefix
+          const automationId = params.automation_id.startsWith('automation.') 
+            ? params.automation_id.substring('automation.'.length)
+            : params.automation_id;
+
+          try {
+            // Try the config API
+            const configResponse = await fetch(`${HASS_HOST}/api/config/automation/config/${automationId}`, {
+              headers: {
+                Authorization: `Bearer ${HASS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            });
+
+            if (configResponse.ok) {
+              const config = await configResponse.json() as AutomationConfig;
+              return {
+                success: true,
+                automation_config: {
+                  entity_id: params.automation_id,
+                  alias: config.alias,
+                  description: config.description || null,
+                  mode: config.mode || 'single',
+                  trigger: config.trigger,
+                  condition: config.condition || [],
+                  action: config.action,
+                },
+                source: 'config_api'
+              };
+            }
+          } catch (configError) {
+            // Config API failed, continue with state-based response
+          }
+
+          // If config API fails, return what we can from the state
+          return {
+            success: true,
+            automation_config: {
+              entity_id: params.automation_id,
+              alias: stateData.attributes.friendly_name || params.automation_id,
+              description: stateData.attributes.description || null,
+              mode: stateData.attributes.mode || 'single',
+              trigger: [], // Not available from state API
+              condition: [], // Not available from state API  
+              action: [], // Not available from state API
+              note: 'Limited information available - full configuration not accessible via API for this automation'
+            },
+          };
+        } else if (params.action === 'get_yaml') {
+          if (!params.automation_id) {
+            throw new Error('Automation ID is required for get_yaml action');
+          }
+
+          // Get automation state first
+          const stateResponse = await fetch(`${HASS_HOST}/api/states/${params.automation_id}`, {
+            headers: {
+              Authorization: `Bearer ${HASS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+          });
+
+          if (!stateResponse.ok) {
+            throw new Error(`Failed to get automation state: ${stateResponse.status} ${stateResponse.statusText}`);
+          }
+
+          const stateData = await stateResponse.json() as HassState;
+
+          // Extract automation ID for config API
+          const automationId = params.automation_id.startsWith('automation.') 
+            ? params.automation_id.substring('automation.'.length)
+            : params.automation_id;
+
+          // Try multiple approaches to get detailed config
+          let yamlContent = null;
+          let configData = null;
+          let dataSource = 'unknown';
+
+          // Approach 1: Try WebSocket API (most direct access to automation config)
+          if (wsClient) {
+            try {
+              const wsConfig = await wsClient.getAutomationConfig(params.automation_id);
+              if (wsConfig && wsConfig.config) {
+                configData = wsConfig.config;
+                dataSource = 'websocket_api';
+              }
+            } catch (wsError) {
+              // WebSocket API failed, continue with other methods
+            }
+          }
+
+          // Approach 2: Try the automation config API
+          if (!configData) {
+            try {
+              const configResponse = await fetch(`${HASS_HOST}/api/config/automation/config/${automationId}`, {
+                headers: {
+                  Authorization: `Bearer ${HASS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+              });
+
+              if (configResponse.ok) {
+                configData = await configResponse.json() as AutomationConfig;
+                dataSource = 'config_api';
+              }
+            } catch (error) {
+              // Config API failed, continue with other methods
+            }
+          }
+
+          // Approach 3: Try to get automation list from config API to find our automation
+          if (!configData) {
+            try {
+              const allConfigResponse = await fetch(`${HASS_HOST}/api/config/automation/config`, {
+                headers: {
+                  Authorization: `Bearer ${HASS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+              });
+
+              if (allConfigResponse.ok) {
+                const allConfigs = await allConfigResponse.json() as AutomationConfig[];
+                // Find our automation by alias or ID
+                configData = allConfigs.find(config => 
+                  config.alias === stateData.attributes.friendly_name ||
+                  config.alias === automationId
+                );
+                if (configData) {
+                  dataSource = 'all_config_api';
+                }
+              }
+            } catch (error) {
+              // All config API also failed
+            }
+          }
+
+          // Approach 4: Try the template API for automation inspection
+          if (!configData) {
+            try {
+              const templateResponse = await fetch(`${HASS_HOST}/api/template`, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${HASS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  template: `{{ state_attr('${params.automation_id}', 'configuration') }}`
+                }),
+              });
+
+              if (templateResponse.ok) {
+                const templateResult = await templateResponse.text();
+                if (templateResult && templateResult !== 'None' && templateResult !== 'null') {
+                  try {
+                    configData = JSON.parse(templateResult);
+                    dataSource = 'template_api';
+                  } catch (parseError) {
+                    // Template didn't return valid JSON
+                  }
+                }
+              }
+            } catch (error) {
+              // Template API failed
+            }
+          }
+
+          // If we have config data, format it as YAML-like structure
+          if (configData) {
+            const sourceDescription = dataSource === 'websocket_api' ? 'via WebSocket API' : 
+                                    dataSource === 'config_api' ? 'via Config API' :
+                                    dataSource === 'all_config_api' ? 'via All Config API' :
+                                    dataSource === 'template_api' ? 'via Template API' : 'unknown source';
+            
+            yamlContent = `# Automation: ${configData.alias || params.automation_id}
+${configData.description ? `# Description: ${configData.description}\n` : ''}# Retrieved ${sourceDescription}
+
+automation:
+  alias: ${configData.alias || 'Unknown'}
+  description: ${configData.description || 'No description'}
+  mode: ${configData.mode || 'single'}
+  
+  trigger:
+${configData.trigger ? configData.trigger.map((t: any) => `    - ${JSON.stringify(t, null, 6).replace(/\n/g, '\n      ')}`).join('\n') : '    # No triggers available'}
+
+  condition:
+${configData.condition && configData.condition.length > 0 
+  ? configData.condition.map((c: any) => `    - ${JSON.stringify(c, null, 6).replace(/\n/g, '\n      ')}`).join('\n')
+  : '    # No conditions'}
+
+  action:
+${configData.action ? configData.action.map((a: any) => `    - ${JSON.stringify(a, null, 6).replace(/\n/g, '\n      ')}`).join('\n') : '    # No actions available'}`;
+
+            return {
+              success: true,
+              automation_yaml: yamlContent,
+              raw_config: configData,
+              source: dataSource
+            };
+          }
+
+          // Fallback: Create YAML from state information
+          yamlContent = `# Automation: ${stateData.attributes.friendly_name || params.automation_id}
+# Note: Limited information - full configuration not available via API
+${stateData.attributes.description ? `# Description: ${stateData.attributes.description}\n` : ''}
+automation:
+  alias: ${stateData.attributes.friendly_name || automationId}
+  description: ${stateData.attributes.description || 'No description available'}
+  mode: ${stateData.attributes.mode || 'single'}
+  
+  # Configuration details not accessible via API
+  # This automation was likely created through the UI
+  # and full configuration is not exposed through REST API
+  
+  # Current state: ${stateData.state}
+  # Last triggered: ${stateData.attributes.last_triggered || 'Never'}
+  
+  trigger:
+    # Trigger configuration not available
+    
+  condition:
+    # Condition configuration not available
+    
+  action:
+    # Action configuration not available`;
+
+          return {
+            success: true,
+            automation_yaml: yamlContent,
+            raw_config: null,
+            source: 'state_based_fallback',
+            note: 'Limited YAML generated from state information - full configuration not accessible'
           };
         } else {
           if (!params.automation_id) {
-            throw new Error('Automation ID is required for toggle and trigger actions');
+            throw new Error('Automation ID is required for toggle, trigger, get_config, and get_yaml actions');
           }
 
           const service = params.action === 'toggle' ? 'toggle' : 'trigger';
@@ -1398,6 +1861,9 @@ async function main() {
           '/health',
           '/list_devices', 
           '/control',
+          '/automations',
+          '/automations/:automation_id/config',
+          '/automations/:automation_id/yaml',
           '/subscribe_events',
           '/sse_stats',
           '/mcp/initialize',
