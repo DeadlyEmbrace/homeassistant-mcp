@@ -14,7 +14,8 @@ export const DomainSchema = z.enum([
     "vacuum",
     "scene",
     "script",
-    "camera"
+    "camera",
+    "update"
 ]);
 
 // Generic list request schema
@@ -199,6 +200,27 @@ export const CameraSchema = z.object({
     state_attributes: CameraAttributesSchema,
 });
 
+// Update
+export const UpdateAttributesSchema = z.object({
+    title: z.string().optional(),
+    installed_version: z.string().optional(),
+    latest_version: z.string().optional(),
+    skipped_version: z.string().optional(),
+    release_summary: z.string().optional(),
+    release_url: z.string().optional(),
+    auto_update: z.boolean().optional(),
+    device_class: z.enum(['firmware']).optional(),
+    supported_features: z.number().optional(),
+    in_progress: z.boolean().optional(),
+    update_percentage: z.number().optional(),
+});
+
+export const UpdateSchema = z.object({
+    entity_id: z.string(),
+    state: z.string(),
+    state_attributes: UpdateAttributesSchema,
+});
+
 // Response schemas for new devices
 export const ListMediaPlayersResponseSchema = z.object({
     media_players: z.array(MediaPlayerSchema),
@@ -226,4 +248,8 @@ export const ListScriptsResponseSchema = z.object({
 
 export const ListCamerasResponseSchema = z.object({
     cameras: z.array(CameraSchema),
+});
+
+export const ListUpdatesResponseSchema = z.object({
+    updates: z.array(UpdateSchema),
 });

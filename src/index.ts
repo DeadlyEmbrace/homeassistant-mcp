@@ -401,6 +401,169 @@ app.get('/get_sse_stats', async (req, res) => {
   }
 });
 
+// Firmware Update endpoints
+app.get('/firmware_updates', async (req, res) => {
+  try {
+    // Get token from Authorization header
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token || token !== HASS_TOKEN) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Invalid token'
+      });
+    }
+
+    const tool = tools.find(t => t.name === 'firmware_update');
+    if (!tool) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tool not found'
+      });
+    }
+
+    const result = await tool.execute({ action: 'list' });
+    res.json(result);
+  } catch (error) {
+    logger.error('Error in /firmware_updates endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/firmware_updates',
+      method: 'GET',
+      hasToken: !!req.headers.authorization,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    });
+  }
+});
+
+app.post('/firmware_updates/install', async (req, res) => {
+  try {
+    // Get token from Authorization header
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token || token !== HASS_TOKEN) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Invalid token'
+      });
+    }
+
+    const tool = tools.find(t => t.name === 'firmware_update');
+    if (!tool) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tool not found'
+      });
+    }
+
+    const { entity_id, version, backup } = req.body;
+    const result = await tool.execute({ 
+      action: 'install', 
+      entity_id, 
+      version, 
+      backup 
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error('Error in /firmware_updates/install endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/firmware_updates/install',
+      method: 'POST',
+      hasToken: !!req.headers.authorization,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    });
+  }
+});
+
+app.post('/firmware_updates/skip', async (req, res) => {
+  try {
+    // Get token from Authorization header
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token || token !== HASS_TOKEN) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Invalid token'
+      });
+    }
+
+    const tool = tools.find(t => t.name === 'firmware_update');
+    if (!tool) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tool not found'
+      });
+    }
+
+    const { entity_id } = req.body;
+    const result = await tool.execute({ 
+      action: 'skip', 
+      entity_id 
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error('Error in /firmware_updates/skip endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/firmware_updates/skip',
+      method: 'POST',
+      hasToken: !!req.headers.authorization,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    });
+  }
+});
+
+app.post('/firmware_updates/clear_skipped', async (req, res) => {
+  try {
+    // Get token from Authorization header
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token || token !== HASS_TOKEN) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Invalid token'
+      });
+    }
+
+    const tool = tools.find(t => t.name === 'firmware_update');
+    if (!tool) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tool not found'
+      });
+    }
+
+    const { entity_id } = req.body;
+    const result = await tool.execute({ 
+      action: 'clear_skipped', 
+      entity_id 
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error('Error in /firmware_updates/clear_skipped endpoint', error instanceof Error ? error : new Error(String(error)), {
+      endpoint: '/firmware_updates/clear_skipped',
+      method: 'POST',
+      hasToken: !!req.headers.authorization,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    });
+  }
+});
+
 // Error handling middleware
 app.use(errorHandler);
 
@@ -541,8 +704,19 @@ interface NotifyParams {
 }
 
 interface AutomationParams {
-  action: 'list' | 'toggle' | 'trigger' | 'get_config' | 'get_yaml';
+  action: 'list' | 'toggle' | 'trigger' | 'get_config' | 'get_yaml' | 'create' | 'validate';
   automation_id?: string;
+  // Fields for automation creation
+  alias?: string;
+  description?: string;
+  mode?: 'single' | 'restart' | 'queued' | 'parallel';
+  triggers?: any;
+  condition?: any;
+  action_config?: any;
+  // Validation-only fields
+  validate_trigger?: any;
+  validate_condition?: any;
+  validate_action?: any;
 }
 
 interface AddonParams {
@@ -569,6 +743,13 @@ interface AutomationConfigParams {
     condition?: any[];
     action: any[];
   };
+}
+
+interface FirmwareUpdateParams {
+  action: 'list' | 'install' | 'skip' | 'clear_skipped';
+  entity_id?: string;
+  version?: string;
+  backup?: boolean;
 }
 
 async function main() {
@@ -992,8 +1173,19 @@ async function main() {
     name: 'automation',
     description: 'Manage Home Assistant automations',
     parameters: z.object({
-      action: z.enum(['list', 'toggle', 'trigger', 'get_config', 'get_yaml']).describe('Action to perform with automation'),
+      action: z.enum(['list', 'toggle', 'trigger', 'get_config', 'get_yaml', 'create', 'validate']).describe('Action to perform with automation'),
       automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_config, and get_yaml actions)'),
+      // Fields for automation creation
+      alias: z.string().optional().describe('Automation name/alias (required for create action)'),
+      description: z.string().optional().describe('Automation description'),
+      mode: z.enum(['single', 'restart', 'queued', 'parallel']).optional().describe('Automation execution mode'),
+      triggers: z.any().optional().describe('Automation triggers array (required for create action)'),
+      condition: z.any().optional().describe('Automation condition configuration'),
+      action_config: z.any().optional().describe('Automation action configuration (required for create action)'),
+      // Validation-only fields
+      validate_trigger: z.any().optional().describe('Trigger configuration to validate'),
+      validate_condition: z.any().optional().describe('Condition configuration to validate'),
+      validate_action: z.any().optional().describe('Action configuration to validate'),
     }),
     execute: async (params: AutomationParams) => {
       try {
@@ -1298,6 +1490,169 @@ automation:
             source: 'state_based_fallback',
             note: 'Limited YAML generated from state information - full configuration not accessible'
           };
+        } else if (params.action === 'create') {
+          if (!params.alias) {
+            throw new Error('Alias is required for create action');
+          }
+          if (!params.triggers) {
+            throw new Error('Trigger configuration is required for create action');
+          }
+          if (!params.action_config) {
+            throw new Error('Action configuration is required for create action');
+          }
+
+          // Build automation configuration
+          const automationId = params.alias.toLowerCase().replace(/[^a-z0-9]/g, '_');
+          const automationConfig: any = {
+            id: automationId,
+            alias: params.alias,
+            mode: params.mode || 'single',
+            triggers: params.triggers,
+            action: params.action_config
+          };
+
+          if (params.description) {
+            automationConfig.description = params.description;
+          }
+          if (params.condition) {
+            automationConfig.condition = params.condition;
+          }
+
+          // First, validate the configuration via WebSocket if available
+          if (wsClient) {
+            try {
+              const validation = await wsClient.validateConfig(
+                automationConfig.triggers,
+                automationConfig.condition,
+                automationConfig.action
+              );
+
+              if (!validation.trigger?.valid) {
+                throw new Error(`Invalid trigger configuration: ${validation.trigger?.error}`);
+              }
+              if (automationConfig.condition && !validation.condition?.valid) {
+                throw new Error(`Invalid condition configuration: ${validation.condition?.error}`);
+              }
+              if (!validation.action?.valid) {
+                throw new Error(`Invalid action configuration: ${validation.action?.error}`);
+              }
+            } catch (validationError) {
+              if (validationError instanceof Error && validationError.message.includes('Invalid')) {
+                throw validationError;
+              }
+              // If validation fails for other reasons, continue with creation attempt
+            }
+          }
+
+          // Try to create automation via WebSocket service call first
+          if (wsClient) {
+            try {
+              // Use the correct Home Assistant Config API endpoint
+              const response = await fetch(`${HASS_HOST}/api/config/automation/config/${automationId}`, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${HASS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(automationConfig),
+              });
+
+              if (response.ok) {
+                const createdAutomation = await response.json();
+                
+                // Reload automations to make it active
+                await wsClient.callService('automation', 'reload');
+                
+                return {
+                  success: true,
+                  message: `Successfully created automation: ${params.alias}`,
+                  automation_config: createdAutomation,
+                  automation_id: automationId,
+                  entity_id: `automation.${automationId}`,
+                  source: 'websocket_creation'
+                };
+              } else {
+                const errorText = await response.text();
+                throw new Error(`Config API failed: ${response.status} ${response.statusText} - ${errorText}`);
+              }
+            } catch (wsError) {
+              // WebSocket creation failed, try fallback methods
+              console.warn('WebSocket creation failed:', wsError);
+            }
+          }
+
+          // Fallback to REST API only
+          const response = await fetch(`${HASS_HOST}/api/config/automation/config/${automationId}`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${HASS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(automationConfig),
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Failed to create automation: ${response.status} ${response.statusText} - ${errorText}`);
+          }
+
+          const createdAutomation = await response.json();
+          
+          // Reload automations to make it active
+          try {
+            await fetch(`${HASS_HOST}/api/services/automation/reload`, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${HASS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            });
+          } catch (reloadError) {
+            // Reload failed, but automation was created
+          }
+
+          return {
+            success: true,
+            message: `Successfully created automation: ${params.alias}`,
+            automation_config: createdAutomation,
+            automation_id: automationId,
+            entity_id: `automation.${automationId}`,
+            source: 'rest_api_creation'
+          };
+        } else if (params.action === 'validate') {
+          if (!params.validate_trigger && !params.validate_condition && !params.validate_action) {
+            throw new Error('At least one of validate_trigger, validate_condition, or validate_action is required for validate action');
+          }
+
+          // Use WebSocket validation if available
+          if (wsClient) {
+            try {
+              const validation = await wsClient.validateConfig(
+                params.validate_trigger,
+                params.validate_condition,
+                params.validate_action
+              );
+
+              return {
+                success: true,
+                validation_results: validation,
+                source: 'websocket_validation'
+              };
+            } catch (wsError) {
+              return {
+                success: false,
+                message: `WebSocket validation failed: ${wsError instanceof Error ? wsError.message : String(wsError)}`,
+                source: 'websocket_validation'
+              };
+            }
+          }
+
+          // Fallback to REST API validation (limited)
+          return {
+            success: false,
+            message: 'WebSocket not available for validation. Full validation requires WebSocket connection.',
+            source: 'rest_fallback'
+          };
         } else {
           if (!params.automation_id) {
             throw new Error('Automation ID is required for toggle, trigger, get_config, and get_yaml actions');
@@ -1326,6 +1681,9 @@ automation:
             automation_id: responseData.automation_id,
           };
         }
+
+        // This should never be reached due to z.enum validation, but included for safety
+        throw new Error(`Invalid action: ${params.action}. Must be one of: list, toggle, trigger, get_config, get_yaml, create, validate`);
       } catch (error) {
         return {
           success: false,
@@ -1782,6 +2140,111 @@ automation:
   };
   registerTool(getSSEStatsTool);
   tools.push(getSSEStatsTool);
+
+  // Add the firmware update tool
+  const firmwareUpdateTool = {
+    name: 'firmware_update',
+    description: 'Manage firmware updates for devices and services',
+    parameters: z.object({
+      action: z.enum(['list', 'install', 'skip', 'clear_skipped']).describe('Action to perform'),
+      entity_id: z.string().optional().describe('Update entity ID (required for install, skip, and clear_skipped actions)'),
+      version: z.string().optional().describe('Specific version to install (optional, defaults to latest)'),
+      backup: z.boolean().optional().describe('Create backup before installing update'),
+    }),
+    execute: async (params: FirmwareUpdateParams) => {
+      try {
+        if (params.action === 'list') {
+          // List all available update entities
+          const response = await fetch(`${HASS_HOST}/api/states`, {
+            headers: {
+              Authorization: `Bearer ${HASS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to fetch update entities: ${response.statusText}`);
+          }
+
+          const states = await response.json() as HassState[];
+          const updateEntities = states.filter(state => state.entity_id.startsWith('update.'));
+
+          return {
+            success: true,
+            updates: updateEntities.map(entity => ({
+              entity_id: entity.entity_id,
+              state: entity.state,
+              title: entity.attributes.title || entity.attributes.friendly_name,
+              installed_version: entity.attributes.installed_version,
+              latest_version: entity.attributes.latest_version,
+              skipped_version: entity.attributes.skipped_version,
+              release_summary: entity.attributes.release_summary,
+              release_url: entity.attributes.release_url,
+              auto_update: entity.attributes.auto_update,
+              device_class: entity.attributes.device_class,
+              in_progress: entity.attributes.in_progress,
+              update_percentage: entity.attributes.update_percentage,
+              supported_features: entity.attributes.supported_features,
+            })),
+          };
+        } else {
+          if (!params.entity_id) {
+            throw new Error('Entity ID is required for install, skip, and clear_skipped actions');
+          }
+
+          let service = '';
+          const serviceData: Record<string, any> = {
+            entity_id: params.entity_id,
+          };
+
+          switch (params.action) {
+            case 'install':
+              service = 'update.install';
+              if (params.version) {
+                serviceData.version = params.version;
+              }
+              if (params.backup !== undefined) {
+                serviceData.backup = params.backup;
+              }
+              break;
+            case 'skip':
+              service = 'update.skip';
+              break;
+            case 'clear_skipped':
+              service = 'update.clear_skipped';
+              break;
+          }
+
+          const response = await fetch(`${HASS_HOST}/api/services/${service.replace('.', '/')}`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${HASS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(serviceData),
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to ${params.action} update: ${response.statusText}`);
+          }
+
+          const responseData = await response.json();
+          return {
+            success: true,
+            message: `Successfully executed ${params.action} for ${params.entity_id}`,
+            data: responseData,
+          };
+        }
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+        };
+      }
+    },
+  };
+  registerTool(firmwareUpdateTool);
+  tools.push(firmwareUpdateTool);
 
   // ...existing code...
 

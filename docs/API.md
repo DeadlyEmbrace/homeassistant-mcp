@@ -346,6 +346,79 @@ ws.send(JSON.stringify({
 }));
 ```
 
+### 8. Firmware Updates
+
+#### GET /firmware_updates
+
+Lists all available firmware updates.
+
+**Response:**
+```json
+{
+  "success": true,
+  "updates": [
+    {
+      "entity_id": "update.my_device",
+      "state": "on",
+      "title": "My Device Firmware",
+      "installed_version": "1.2.3",
+      "latest_version": "1.3.0",
+      "skipped_version": null,
+      "release_summary": "Bug fixes and performance improvements",
+      "release_url": "https://example.com/releases/1.3.0",
+      "auto_update": false,
+      "device_class": "firmware",
+      "in_progress": false,
+      "update_percentage": null,
+      "supported_features": 15
+    }
+  ]
+}
+```
+
+#### POST /firmware_updates/install
+
+Installs a firmware update.
+
+**Request Body:**
+```json
+{
+  "entity_id": "update.my_device",
+  "version": "1.3.0",
+  "backup": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Successfully executed install for update.my_device"
+}
+```
+
+#### POST /firmware_updates/skip
+
+Skips a firmware update.
+
+**Request Body:**
+```json
+{
+  "entity_id": "update.my_device"
+}
+```
+
+#### POST /firmware_updates/clear_skipped
+
+Clears a previously skipped firmware update.
+
+**Request Body:**
+```json
+{
+  "entity_id": "update.my_device"
+}
+```
+
 ## Security Best Practices
 
 1. Always use HTTPS in production

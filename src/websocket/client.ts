@@ -199,6 +199,36 @@ export class HassWebSocketClient extends EventEmitter {
         });
     }
 
+    public async callService(domain: string, service: string, serviceData?: any, target?: any): Promise<any> {
+        const message: any = {
+            type: 'call_service',
+            domain,
+            service
+        };
+
+        if (serviceData) {
+            message.service_data = serviceData;
+        }
+
+        if (target) {
+            message.target = target;
+        }
+
+        return this.callWS(message);
+    }
+
+    public async validateConfig(trigger?: any, condition?: any, action?: any): Promise<any> {
+        const message: any = {
+            type: 'validate_config'
+        };
+
+        if (trigger) message.trigger = trigger;
+        if (condition) message.condition = condition;
+        if (action) message.action = action;
+
+        return this.callWS(message);
+    }
+
     private send(message: any): void {
         if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(message));

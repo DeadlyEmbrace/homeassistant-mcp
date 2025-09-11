@@ -61,6 +61,7 @@ See [SSE_API.md](docs/SSE_API.md) for complete documentation of the SSE system.
   - [Device Control](#device-control)
   - [Add-on Management](#add-on-management)
   - [Package Management](#package-management)
+  - [Firmware Update Management](#firmware-update-management)
   - [Automation Management](#automation-management)
 - [Natural Language Integration](#natural-language-integration)
 - [Troubleshooting](#troubleshooting)
@@ -98,6 +99,16 @@ See [SSE_API.md](docs/SSE_API.md) for complete documentation of the SSE system.
     - Custom integrations
     - Frontend themes
     - Python scripts
+    - AppDaemon and NetDaemon apps
+  - Install, update, and uninstall packages
+
+- **Firmware Update Management**
+  - List available firmware updates for devices
+  - Install firmware updates with optional backup
+  - Skip unwanted updates
+  - Clear previously skipped updates
+  - Support for specific version installations
+  - Progress tracking and update status monitoring
     - AppDaemon apps
     - NetDaemon apps
   - Version control and updates
@@ -431,6 +442,45 @@ Quick example for n8n HTTP Request node:
   "category": "integration",
   "repository": "hacs/integration",
   "version": "1.32.0"
+}
+```
+
+### Firmware Update Management
+
+#### List Available Updates
+```json
+{
+  "tool": "firmware_update",
+  "action": "list"
+}
+```
+
+#### Install Firmware Update
+```json
+{
+  "tool": "firmware_update",
+  "action": "install",
+  "entity_id": "update.my_device_firmware",
+  "version": "2.1.0",
+  "backup": true
+}
+```
+
+#### Skip Firmware Update
+```json
+{
+  "tool": "firmware_update",
+  "action": "skip",
+  "entity_id": "update.my_device_firmware"
+}
+```
+
+#### Clear Skipped Update
+```json
+{
+  "tool": "firmware_update",
+  "action": "clear_skipped",
+  "entity_id": "update.my_device_firmware"
 }
 ```
 
