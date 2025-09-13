@@ -752,6 +752,164 @@ interface FirmwareUpdateParams {
   backup?: boolean;
 }
 
+// Enhanced Entity Validator
+interface EntityValidationResult {
+  valid: boolean;
+  exists: boolean;
+  currentState?: string;
+  supportedFeatures?: number;
+  error?: string;
+  attributes?: Record<string, any>;
+}
+
+class EntityValidator {
+  private hassHost: string;
+  private hassToken: string;
+  private entityCache: Map<string, { state: any; timestamp: number; }> = new Map();
+  private cacheExpiry = 5000; // 5 seconds
+
+  constructor(hassHost: string, hassToken: string) {
+    this.hassHost = hassHost;
+    this.hassToken = hassToken;
+  }
+
+  async validateEntityExists(entityId: string): Promise<EntityValidationResult> {
+    try {
+      const response = await fetch(`${this.hassHost}/api/states/${entityId}`, {
+        headers: {
+          Authorization: `Bearer ${this.hassToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          return {
+            valid: false,
+            exists: false,
+            error: `Entity '${entityId}' not found`
+          };
+        }
+        return {
+          valid: false,
+          exists: false,
+          error: `Failed to check entity: ${response.statusText}`
+        };
+      }
+
+      const state = await response.json() as HassState;
+      return {
+        valid: true,
+        exists: true,
+        currentState: state.state,
+        supportedFeatures: state.attributes.supported_features,
+        attributes: state.attributes
+      };
+    } catch (error) {
+      return {
+        valid: false,
+        exists: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      };
+    }
+  }
+
+  async validateEntityOperation(entityId: string, operation: string, parameters?: Record<string, any>): Promise<EntityValidationResult> {
+    const existsResult = await this.validateEntityExists(entityId);
+    if (!existsResult.valid) {
+      return existsResult;
+    }
+
+    const [domain] = entityId.split('.');
+    const validationErrors: string[] = [];
+
+    // Domain-specific validation
+    switch (domain) {
+      case 'light':
+        if (operation === 'turn_on' && parameters?.brightness !== undefined) {
+          if (parameters.brightness < 0 || parameters.brightness > 255) {
+            validationErrors.push('Brightness must be between 0 and 255');
+          }
+        }
+        if (parameters?.rgb_color && !Array.isArray(parameters.rgb_color)) {
+          validationErrors.push('RGB color must be an array of three numbers');
+        }
+        break;
+
+      case 'cover':
+        if ((operation === 'set_position' || operation === 'set_tilt_position') && parameters?.position !== undefined) {
+          if (parameters.position < 0 || parameters.position > 100) {
+            validationErrors.push('Position must be between 0 and 100');
+          }
+        }
+        break;
+
+      case 'climate':
+        if (operation === 'set_temperature' && parameters?.temperature !== undefined) {
+          // Basic temperature range validation
+          if (parameters.temperature < -50 || parameters.temperature > 50) {
+            validationErrors.push('Temperature must be between -50 and 50 degrees');
+          }
+        }
+        break;
+
+      case 'switch':
+      case 'fan':
+      case 'lock':
+      case 'vacuum':
+        // Basic operations only
+        if (!['turn_on', 'turn_off', 'toggle'].includes(operation)) {
+          validationErrors.push(`Operation '${operation}' not supported for ${domain} entities`);
+        }
+        break;
+    }
+
+    return {
+      valid: validationErrors.length === 0,
+      exists: true,
+      currentState: existsResult.currentState,
+      supportedFeatures: existsResult.supportedFeatures,
+      attributes: existsResult.attributes,
+      error: validationErrors.length > 0 ? validationErrors.join('; ') : undefined
+    };
+  }
+
+  async validateStateChange(entityId: string, expectedState?: string, timeoutMs: number = 3000): Promise<EntityValidationResult> {
+    const startTime = Date.now();
+    
+    while (Date.now() - startTime < timeoutMs) {
+      const result = await this.validateEntityExists(entityId);
+      
+      if (!result.valid) {
+        return result;
+      }
+
+      if (!expectedState || result.currentState === expectedState) {
+        return {
+          valid: true,
+          exists: true,
+          currentState: result.currentState,
+          supportedFeatures: result.supportedFeatures,
+          attributes: result.attributes
+        };
+      }
+
+      // Wait a bit before checking again
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    return {
+      valid: false,
+      exists: true,
+      error: `Entity did not reach expected state '${expectedState}' within ${timeoutMs}ms`
+    };
+  }
+
+  clearCache(): void {
+    this.entityCache.clear();
+  }
+}
+
 async function main() {
   // Validate required environment variables first
   if (!HASS_TOKEN) {
@@ -762,6 +920,9 @@ async function main() {
     });
     process.exit(1);
   }
+
+  // Initialize entity validator
+  const entityValidator = new EntityValidator(HASS_HOST!, HASS_TOKEN!);
 
   // Log application startup
   await logger.info('Home Assistant MCP Server starting up', {
@@ -819,9 +980,136 @@ async function main() {
   // Add the list devices tool
   const listDevicesTool = {
     name: 'list_devices',
-    description: 'List all available Home Assistant devices',
-    parameters: z.object({}).describe('No parameters required'),
-    execute: async () => {
+    description: 'List all Home Assistant devices grouped by domain with optional filtering',
+    parameters: z.object({
+      domain: z.string().optional().describe('Filter by specific domain (e.g., "light", "switch", "sensor")'),
+      state: z.string().optional().describe('Filter by current state (e.g., "on", "off", "unavailable")'),
+      sort_by: z.enum(['entity_id', 'domain', 'state', 'friendly_name']).default('domain').optional()
+        .describe('Sort devices by specified field'),
+      include_unavailable: z.boolean().default(true).optional()
+        .describe('Include devices that are unavailable'),
+    }),
+    execute: async (params: {
+      domain?: string;
+      state?: string;
+      sort_by?: 'entity_id' | 'domain' | 'state' | 'friendly_name';
+      include_unavailable?: boolean;
+    } = {}) => {
+      try {
+        const response = await fetch(`${HASS_HOST}/api/states`, {
+          headers: {
+            Authorization: `Bearer ${HASS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch devices: ${response.statusText}`);
+        }
+
+        let states = await response.json() as HassState[];
+
+        // Apply filters
+        if (params.domain) {
+          states = states.filter(state => state.entity_id.startsWith(`${params.domain}.`));
+        }
+
+        if (params.state) {
+          states = states.filter(state => state.state.toLowerCase() === params.state!.toLowerCase());
+        }
+
+        if (!params.include_unavailable) {
+          states = states.filter(state => state.state !== 'unavailable');
+        }
+
+        // Sort devices
+        const sortBy = params.sort_by || 'domain';
+        states.sort((a, b) => {
+          let aValue: string, bValue: string;
+          
+          switch (sortBy) {
+            case 'entity_id':
+              aValue = a.entity_id;
+              bValue = b.entity_id;
+              break;
+            case 'domain':
+              aValue = a.entity_id.split('.')[0];
+              bValue = b.entity_id.split('.')[0];
+              break;
+            case 'state':
+              aValue = a.state;
+              bValue = b.state;
+              break;
+            case 'friendly_name':
+              aValue = a.attributes?.friendly_name || a.entity_id;
+              bValue = b.attributes?.friendly_name || b.entity_id;
+              break;
+            default:
+              aValue = a.entity_id;
+              bValue = b.entity_id;
+          }
+          
+          return aValue.localeCompare(bValue);
+        });
+
+        const devices: Record<string, HassState[]> = {};
+        const deviceCounts: Record<string, number> = {};
+
+        // Group devices by domain
+        states.forEach(state => {
+          const [domain] = state.entity_id.split('.');
+          if (!devices[domain]) {
+            devices[domain] = [];
+            deviceCounts[domain] = 0;
+          }
+          devices[domain].push(state);
+          deviceCounts[domain]++;
+        });
+
+        return {
+          success: true,
+          total_devices: states.length,
+          domain_counts: deviceCounts,
+          filters_applied: {
+            domain: params.domain,
+            state: params.state,
+            sort_by: sortBy,
+            include_unavailable: params.include_unavailable ?? true,
+          },
+          devices
+        };
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+      }
+    }
+  };
+  registerTool(listDevicesTool);
+
+  // Add the device search tool
+  const searchDevicesTool = {
+    name: 'search_devices',
+    description: 'Search for Home Assistant devices by name, domain, entity ID pattern, state, or attributes',
+    parameters: z.object({
+      query: z.string().optional().describe('Search query - matches against entity ID, friendly name, or domain'),
+      domain: z.string().optional().describe('Filter by specific domain (e.g., "light", "switch", "sensor")'),
+      state: z.string().optional().describe('Filter by current state (e.g., "on", "off", "unavailable")'),
+      area: z.string().optional().describe('Filter by area name'),
+      device_class: z.string().optional().describe('Filter by device class (e.g., "motion", "temperature", "humidity")'),
+      limit: z.number().min(1).max(100).default(20).optional().describe('Maximum number of results to return'),
+      include_attributes: z.boolean().default(false).optional().describe('Include full attributes in response'),
+    }),
+    execute: async (params: {
+      query?: string;
+      domain?: string;
+      state?: string;
+      area?: string;
+      device_class?: string;
+      limit?: number;
+      include_attributes?: boolean;
+    }) => {
       try {
         const response = await fetch(`${HASS_HOST}/api/states`, {
           headers: {
@@ -835,20 +1123,93 @@ async function main() {
         }
 
         const states = await response.json() as HassState[];
-        const devices: Record<string, HassState[]> = {};
+        let filteredDevices = states;
 
-        // Group devices by domain
-        states.forEach(state => {
-          const [domain] = state.entity_id.split('.');
-          if (!devices[domain]) {
-            devices[domain] = [];
+        // Apply domain filter
+        if (params.domain) {
+          filteredDevices = filteredDevices.filter(device => 
+            device.entity_id.startsWith(`${params.domain}.`)
+          );
+        }
+
+        // Apply state filter
+        if (params.state) {
+          filteredDevices = filteredDevices.filter(device => 
+            device.state.toLowerCase() === params.state!.toLowerCase()
+          );
+        }
+
+        // Apply device class filter
+        if (params.device_class) {
+          filteredDevices = filteredDevices.filter(device => 
+            device.attributes?.device_class === params.device_class
+          );
+        }
+
+        // Apply area filter (check area_id in attributes)
+        if (params.area) {
+          filteredDevices = filteredDevices.filter(device => {
+            const areaName = device.attributes?.area_id;
+            const friendlyName = device.attributes?.friendly_name;
+            return areaName?.toLowerCase().includes(params.area!.toLowerCase()) ||
+                   friendlyName?.toLowerCase().includes(params.area!.toLowerCase());
+          });
+        }
+
+        // Apply text search query
+        if (params.query) {
+          const queryLower = params.query.toLowerCase();
+          filteredDevices = filteredDevices.filter(device => {
+            const entityId = device.entity_id.toLowerCase();
+            const friendlyName = device.attributes?.friendly_name?.toLowerCase() || '';
+            const domain = device.entity_id.split('.')[0];
+            
+            return entityId.includes(queryLower) ||
+                   friendlyName.includes(queryLower) ||
+                   domain.includes(queryLower);
+          });
+        }
+
+        // Apply limit
+        const limit = params.limit || 20;
+        const limitedDevices = filteredDevices.slice(0, limit);
+
+        // Format response
+        const results = limitedDevices.map(device => {
+          const baseInfo = {
+            entity_id: device.entity_id,
+            state: device.state,
+            friendly_name: device.attributes?.friendly_name || device.entity_id,
+            domain: device.entity_id.split('.')[0],
+            device_class: device.attributes?.device_class,
+            area_id: device.attributes?.area_id,
+            last_changed: (device as any).last_changed,
+            last_updated: (device as any).last_updated,
+          };
+
+          if (params.include_attributes) {
+            return {
+              ...baseInfo,
+              attributes: device.attributes,
+            };
           }
-          devices[domain].push(state);
+
+          return baseInfo;
         });
 
         return {
           success: true,
-          devices
+          total_found: filteredDevices.length,
+          returned: results.length,
+          devices: results,
+          filters_applied: {
+            query: params.query,
+            domain: params.domain,
+            state: params.state,
+            area: params.area,
+            device_class: params.device_class,
+            limit: limit,
+          },
         };
       } catch (error) {
         return {
@@ -858,7 +1219,720 @@ async function main() {
       }
     }
   };
-  registerTool(listDevicesTool);
+  registerTool(searchDevicesTool);
+
+  // Add the device details tool
+  const deviceDetailsTool = {
+    name: 'get_device_details',
+    description: 'Get detailed information about a specific Home Assistant device',
+    parameters: z.object({
+      entity_id: z.string().describe('The entity ID to get details for'),
+      include_history: z.boolean().default(false).optional()
+        .describe('Include recent state history (last 24 hours)'),
+      include_related: z.boolean().default(false).optional()
+        .describe('Include related entities from the same device'),
+    }),
+    execute: async (params: {
+      entity_id: string;
+      include_history?: boolean;
+      include_related?: boolean;
+    }) => {
+      try {
+        // Get current state
+        const stateResponse = await fetch(`${HASS_HOST}/api/states/${params.entity_id}`, {
+          headers: {
+            Authorization: `Bearer ${HASS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!stateResponse.ok) {
+          if (stateResponse.status === 404) {
+            return {
+              success: false,
+              message: `Entity '${params.entity_id}' not found`,
+              entity_id: params.entity_id,
+            };
+          }
+          throw new Error(`Failed to fetch device details: ${stateResponse.statusText}`);
+        }
+
+        const state = await stateResponse.json() as HassState;
+        const domain = params.entity_id.split('.')[0];
+
+        // Base device information
+        const deviceInfo = {
+          entity_id: state.entity_id,
+          domain: domain,
+          state: state.state,
+          friendly_name: state.attributes?.friendly_name || state.entity_id,
+          attributes: state.attributes,
+          last_changed: (state as any).last_changed,
+          last_updated: (state as any).last_updated,
+          context: (state as any).context,
+        };
+
+        const result: any = {
+          success: true,
+          device: deviceInfo,
+        };
+
+        // Get state history if requested
+        if (params.include_history) {
+          try {
+            const now = new Date();
+            const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            const historyResponse = await fetch(
+              `${HASS_HOST}/api/history/period/${yesterday.toISOString()}?filter_entity_id=${params.entity_id}`,
+              {
+                headers: {
+                  Authorization: `Bearer ${HASS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+              }
+            );
+
+            if (historyResponse.ok) {
+              const history = await historyResponse.json() as any[];
+              result.history = {
+                period: '24_hours',
+                entries: history[0] || [],
+                total_changes: (history[0] as any[])?.length || 0,
+              };
+            }
+          } catch (error) {
+            result.history_error = 'Failed to fetch history data';
+          }
+        }
+
+        // Get related entities if requested
+        if (params.include_related) {
+          try {
+            const allStatesResponse = await fetch(`${HASS_HOST}/api/states`, {
+              headers: {
+                Authorization: `Bearer ${HASS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            });
+
+            if (allStatesResponse.ok) {
+              const allStates = await allStatesResponse.json() as HassState[];
+              const deviceId = state.attributes?.device_id;
+              const areaId = state.attributes?.area_id;
+              
+              // Find related entities by device_id or area_id
+              const relatedEntities = allStates.filter(relatedState => {
+                if (relatedState.entity_id === params.entity_id) return false;
+                
+                return (deviceId && relatedState.attributes?.device_id === deviceId) ||
+                       (areaId && relatedState.attributes?.area_id === areaId);
+              }).map(relatedState => ({
+                entity_id: relatedState.entity_id,
+                domain: relatedState.entity_id.split('.')[0],
+                state: relatedState.state,
+                friendly_name: relatedState.attributes?.friendly_name || relatedState.entity_id,
+                relationship: deviceId && relatedState.attributes?.device_id === deviceId ? 'same_device' : 'same_area',
+              }));
+
+              result.related_entities = {
+                count: relatedEntities.length,
+                entities: relatedEntities,
+              };
+            }
+          } catch (error) {
+            result.related_entities_error = 'Failed to fetch related entities';
+          }
+        }
+
+        // Add domain-specific information
+        switch (domain) {
+          case 'light':
+            result.capabilities = {
+              supports_brightness: 'brightness' in (state.attributes || {}),
+              supports_color: 'rgb_color' in (state.attributes || {}),
+              supports_color_temp: 'color_temp' in (state.attributes || {}),
+              supported_features: state.attributes?.supported_features,
+            };
+            break;
+          case 'climate':
+            result.capabilities = {
+              hvac_modes: state.attributes?.hvac_modes,
+              fan_modes: state.attributes?.fan_modes,
+              swing_modes: state.attributes?.swing_modes,
+              preset_modes: state.attributes?.preset_modes,
+              supported_features: state.attributes?.supported_features,
+            };
+            break;
+          case 'cover':
+            result.capabilities = {
+              supports_position: 'current_position' in (state.attributes || {}),
+              supports_tilt: 'current_tilt_position' in (state.attributes || {}),
+              device_class: state.attributes?.device_class,
+              supported_features: state.attributes?.supported_features,
+            };
+            break;
+          case 'media_player':
+            result.capabilities = {
+              supported_features: state.attributes?.supported_features,
+              source_list: state.attributes?.source_list,
+              sound_mode_list: state.attributes?.sound_mode_list,
+            };
+            break;
+          default:
+            if (state.attributes?.supported_features) {
+              result.capabilities = {
+                supported_features: state.attributes.supported_features,
+              };
+            }
+        }
+
+        return result;
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+          entity_id: params.entity_id,
+        };
+      }
+    }
+  };
+  registerTool(deviceDetailsTool);
+
+  // Add the device discovery helper tool
+  const deviceDiscoveryTool = {
+    name: 'discover_devices',
+    description: 'Discover devices using common patterns like "all lights that are on", "available updates", etc.',
+    parameters: z.object({
+      pattern: z.enum([
+        'lights_on',
+        'lights_off', 
+        'all_lights',
+        'switches_on',
+        'switches_off',
+        'all_switches',
+        'doors_open',
+        'windows_open',
+        'motion_detected',
+        'low_battery',
+        'unavailable_devices',
+        'available_updates',
+        'climate_heating',
+        'climate_cooling',
+        'media_playing',
+        'covers_open',
+        'covers_closed',
+        'sensors_by_class',
+        'recently_changed'
+      ]).describe('Common device discovery pattern'),
+      device_class: z.string().optional().describe('For sensors_by_class pattern, specify device class (e.g., "temperature", "humidity", "motion")'),
+      hours: z.number().min(1).max(168).default(1).optional().describe('For recently_changed pattern, how many hours back to look'),
+    }),
+    execute: async (params: {
+      pattern: string;
+      device_class?: string;
+      hours?: number;
+    }) => {
+      try {
+        const response = await fetch(`${HASS_HOST}/api/states`, {
+          headers: {
+            Authorization: `Bearer ${HASS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch devices: ${response.statusText}`);
+        }
+
+        const states = await response.json() as HassState[];
+        let filteredDevices: HassState[] = [];
+        let description = '';
+
+        switch (params.pattern) {
+          case 'lights_on':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('light.') && state.state === 'on'
+            );
+            description = 'All lights that are currently on';
+            break;
+
+          case 'lights_off':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('light.') && state.state === 'off'
+            );
+            description = 'All lights that are currently off';
+            break;
+
+          case 'all_lights':
+            filteredDevices = states.filter(state => state.entity_id.startsWith('light.'));
+            description = 'All light entities';
+            break;
+
+          case 'switches_on':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('switch.') && state.state === 'on'
+            );
+            description = 'All switches that are currently on';
+            break;
+
+          case 'switches_off':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('switch.') && state.state === 'off'
+            );
+            description = 'All switches that are currently off';
+            break;
+
+          case 'all_switches':
+            filteredDevices = states.filter(state => state.entity_id.startsWith('switch.'));
+            description = 'All switch entities';
+            break;
+
+          case 'doors_open':
+            filteredDevices = states.filter(state => 
+              (state.entity_id.startsWith('binary_sensor.') && 
+               state.attributes?.device_class === 'door' && 
+               state.state === 'on') ||
+              (state.entity_id.startsWith('cover.') && 
+               state.attributes?.device_class === 'door' && 
+               state.state === 'open')
+            );
+            description = 'All doors that are currently open';
+            break;
+
+          case 'windows_open':
+            filteredDevices = states.filter(state => 
+              (state.entity_id.startsWith('binary_sensor.') && 
+               state.attributes?.device_class === 'window' && 
+               state.state === 'on') ||
+              (state.entity_id.startsWith('cover.') && 
+               state.attributes?.device_class === 'window' && 
+               state.state === 'open')
+            );
+            description = 'All windows that are currently open';
+            break;
+
+          case 'motion_detected':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('binary_sensor.') && 
+              state.attributes?.device_class === 'motion' && 
+              state.state === 'on'
+            );
+            description = 'All motion sensors detecting motion';
+            break;
+
+          case 'low_battery':
+            filteredDevices = states.filter(state => {
+              const battery = state.attributes?.battery_level;
+              return battery !== undefined && battery < 20;
+            });
+            description = 'All devices with low battery (< 20%)';
+            break;
+
+          case 'unavailable_devices':
+            filteredDevices = states.filter(state => state.state === 'unavailable');
+            description = 'All devices that are currently unavailable';
+            break;
+
+          case 'available_updates':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('update.') && state.state === 'on'
+            );
+            description = 'All entities with available updates';
+            break;
+
+          case 'climate_heating':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('climate.') && 
+              (state.state === 'heat' || state.attributes?.hvac_action === 'heating')
+            );
+            description = 'All climate entities currently heating';
+            break;
+
+          case 'climate_cooling':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('climate.') && 
+              (state.state === 'cool' || state.attributes?.hvac_action === 'cooling')
+            );
+            description = 'All climate entities currently cooling';
+            break;
+
+          case 'media_playing':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('media_player.') && state.state === 'playing'
+            );
+            description = 'All media players currently playing';
+            break;
+
+          case 'covers_open':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('cover.') && state.state === 'open'
+            );
+            description = 'All covers that are currently open';
+            break;
+
+          case 'covers_closed':
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('cover.') && state.state === 'closed'
+            );
+            description = 'All covers that are currently closed';
+            break;
+
+          case 'sensors_by_class':
+            if (!params.device_class) {
+              return {
+                success: false,
+                message: 'device_class parameter is required for sensors_by_class pattern'
+              };
+            }
+            filteredDevices = states.filter(state => 
+              state.entity_id.startsWith('sensor.') && 
+              state.attributes?.device_class === params.device_class
+            );
+            description = `All ${params.device_class} sensors`;
+            break;
+
+          case 'recently_changed':
+            const hours = params.hours || 1;
+            const cutoffTime = new Date(Date.now() - hours * 60 * 60 * 1000);
+            filteredDevices = states.filter(state => {
+              const lastChanged = (state as any).last_changed;
+              if (!lastChanged) return false;
+              return new Date(lastChanged) > cutoffTime;
+            });
+            description = `All devices that changed state in the last ${hours} hour(s)`;
+            break;
+
+          default:
+            return {
+              success: false,
+              message: `Unknown pattern: ${params.pattern}`
+            };
+        }
+
+        // Format the results
+        const results = filteredDevices.map(device => ({
+          entity_id: device.entity_id,
+          state: device.state,
+          friendly_name: device.attributes?.friendly_name || device.entity_id,
+          domain: device.entity_id.split('.')[0],
+          device_class: device.attributes?.device_class,
+          area_id: device.attributes?.area_id,
+          battery_level: device.attributes?.battery_level,
+          last_changed: (device as any).last_changed,
+        }));
+
+        return {
+          success: true,
+          pattern: params.pattern,
+          description: description,
+          total_found: results.length,
+          devices: results,
+          parameters: {
+            device_class: params.device_class,
+            hours: params.hours,
+          },
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+      }
+    }
+  };
+  registerTool(deviceDiscoveryTool);
+
+  // Add the device relationships tool
+  const deviceRelationshipsTool = {
+    name: 'get_device_relationships',
+    description: 'Get device relationships, areas, floors, and organizational structure',
+    parameters: z.object({
+      view: z.enum(['areas', 'floors', 'device_registry', 'by_area', 'by_floor'])
+        .describe('Type of relationship view to retrieve'),
+      area_id: z.string().optional().describe('For by_area view, specify area ID'),
+      floor_id: z.string().optional().describe('For by_floor view, specify floor ID'),
+      include_empty: z.boolean().default(false).optional()
+        .describe('Include areas/floors with no devices'),
+    }),
+    execute: async (params: {
+      view: 'areas' | 'floors' | 'device_registry' | 'by_area' | 'by_floor';
+      area_id?: string;
+      floor_id?: string;
+      include_empty?: boolean;
+    }) => {
+      try {
+        // Get all entity states
+        const statesResponse = await fetch(`${HASS_HOST}/api/states`, {
+          headers: {
+            Authorization: `Bearer ${HASS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!statesResponse.ok) {
+          throw new Error(`Failed to fetch states: ${statesResponse.statusText}`);
+        }
+
+        const states = await statesResponse.json() as HassState[];
+
+        switch (params.view) {
+          case 'areas': {
+            // Group devices by area
+            const areaGroups: Record<string, HassState[]> = {};
+            const unknownArea: HassState[] = [];
+
+            states.forEach(state => {
+              const areaId = state.attributes?.area_id;
+              if (areaId) {
+                if (!areaGroups[areaId]) {
+                  areaGroups[areaId] = [];
+                }
+                areaGroups[areaId].push(state);
+              } else {
+                unknownArea.push(state);
+              }
+            });
+
+            const areas = Object.entries(areaGroups).map(([areaId, devices]) => ({
+              area_id: areaId,
+              device_count: devices.length,
+              domains: [...new Set(devices.map(d => d.entity_id.split('.')[0]))],
+              devices: devices.map(device => ({
+                entity_id: device.entity_id,
+                domain: device.entity_id.split('.')[0],
+                state: device.state,
+                friendly_name: device.attributes?.friendly_name || device.entity_id,
+              })),
+            }));
+
+            const result: any = {
+              success: true,
+              view: 'areas',
+              total_areas: areas.length,
+              areas: areas,
+            };
+
+            if (unknownArea.length > 0 || params.include_empty) {
+              result.unassigned_devices = {
+                count: unknownArea.length,
+                devices: unknownArea.map(device => ({
+                  entity_id: device.entity_id,
+                  domain: device.entity_id.split('.')[0],
+                  state: device.state,
+                  friendly_name: device.attributes?.friendly_name || device.entity_id,
+                })),
+              };
+            }
+
+            return result;
+          }
+
+          case 'by_area': {
+            if (!params.area_id) {
+              return {
+                success: false,
+                message: 'area_id parameter is required for by_area view'
+              };
+            }
+
+            const areaDevices = states.filter(state => 
+              state.attributes?.area_id === params.area_id
+            );
+
+            if (areaDevices.length === 0) {
+              return {
+                success: false,
+                message: `No devices found in area '${params.area_id}'`
+              };
+            }
+
+            // Group by domain
+            const domainGroups: Record<string, HassState[]> = {};
+            areaDevices.forEach(device => {
+              const domain = device.entity_id.split('.')[0];
+              if (!domainGroups[domain]) {
+                domainGroups[domain] = [];
+              }
+              domainGroups[domain].push(device);
+            });
+
+            return {
+              success: true,
+              view: 'by_area',
+              area_id: params.area_id,
+              total_devices: areaDevices.length,
+              domains: Object.keys(domainGroups),
+              devices_by_domain: Object.entries(domainGroups).map(([domain, devices]) => ({
+                domain: domain,
+                count: devices.length,
+                devices: devices.map(device => ({
+                  entity_id: device.entity_id,
+                  state: device.state,
+                  friendly_name: device.attributes?.friendly_name || device.entity_id,
+                  device_class: device.attributes?.device_class,
+                })),
+              })),
+              all_devices: areaDevices.map(device => ({
+                entity_id: device.entity_id,
+                domain: device.entity_id.split('.')[0],
+                state: device.state,
+                friendly_name: device.attributes?.friendly_name || device.entity_id,
+                device_class: device.attributes?.device_class,
+              })),
+            };
+          }
+
+          case 'device_registry': {
+            // Get devices grouped by device_id
+            const deviceGroups: Record<string, HassState[]> = {};
+            const standaloneEntities: HassState[] = [];
+
+            states.forEach(state => {
+              const deviceId = state.attributes?.device_id;
+              if (deviceId) {
+                if (!deviceGroups[deviceId]) {
+                  deviceGroups[deviceId] = [];
+                }
+                deviceGroups[deviceId].push(state);
+              } else {
+                standaloneEntities.push(state);
+              }
+            });
+
+            const devices = Object.entries(deviceGroups).map(([deviceId, entities]) => {
+              const firstEntity = entities[0];
+              return {
+                device_id: deviceId,
+                entity_count: entities.length,
+                area_id: firstEntity.attributes?.area_id,
+                device_name: firstEntity.attributes?.device_name || 
+                           firstEntity.attributes?.friendly_name?.split(' ')[0] || 
+                           deviceId,
+                domains: [...new Set(entities.map(e => e.entity_id.split('.')[0]))],
+                entities: entities.map(entity => ({
+                  entity_id: entity.entity_id,
+                  domain: entity.entity_id.split('.')[0],
+                  state: entity.state,
+                  friendly_name: entity.attributes?.friendly_name || entity.entity_id,
+                })),
+              };
+            });
+
+            return {
+              success: true,
+              view: 'device_registry',
+              total_devices: devices.length,
+              total_standalone_entities: standaloneEntities.length,
+              devices: devices,
+              standalone_entities: standaloneEntities.map(entity => ({
+                entity_id: entity.entity_id,
+                domain: entity.entity_id.split('.')[0],
+                state: entity.state,
+                friendly_name: entity.attributes?.friendly_name || entity.entity_id,
+                area_id: entity.attributes?.area_id,
+              })),
+            };
+          }
+
+          case 'floors': {
+            // Group devices by floor (using floor_id attribute if available)
+            const floorGroups: Record<string, HassState[]> = {};
+            const noFloorDevices: HassState[] = [];
+
+            states.forEach(state => {
+              const floorId = state.attributes?.floor_id;
+              if (floorId) {
+                if (!floorGroups[floorId]) {
+                  floorGroups[floorId] = [];
+                }
+                floorGroups[floorId].push(state);
+              } else {
+                noFloorDevices.push(state);
+              }
+            });
+
+            const floors = Object.entries(floorGroups).map(([floorId, devices]) => ({
+              floor_id: floorId,
+              device_count: devices.length,
+              areas: [...new Set(devices.map(d => d.attributes?.area_id).filter(Boolean))],
+              domains: [...new Set(devices.map(d => d.entity_id.split('.')[0]))],
+            }));
+
+            return {
+              success: true,
+              view: 'floors',
+              total_floors: floors.length,
+              floors: floors,
+              unassigned_devices_count: noFloorDevices.length,
+            };
+          }
+
+          case 'by_floor': {
+            if (!params.floor_id) {
+              return {
+                success: false,
+                message: 'floor_id parameter is required for by_floor view'
+              };
+            }
+
+            const floorDevices = states.filter(state => 
+              state.attributes?.floor_id === params.floor_id
+            );
+
+            if (floorDevices.length === 0) {
+              return {
+                success: false,
+                message: `No devices found on floor '${params.floor_id}'`
+              };
+            }
+
+            // Group by area within the floor
+            const areaGroups: Record<string, HassState[]> = {};
+            floorDevices.forEach(device => {
+              const areaId = device.attributes?.area_id || 'no_area';
+              if (!areaGroups[areaId]) {
+                areaGroups[areaId] = [];
+              }
+              areaGroups[areaId].push(device);
+            });
+
+            return {
+              success: true,
+              view: 'by_floor',
+              floor_id: params.floor_id,
+              total_devices: floorDevices.length,
+              areas_on_floor: Object.keys(areaGroups).filter(a => a !== 'no_area'),
+              devices_by_area: Object.entries(areaGroups).map(([areaId, devices]) => ({
+                area_id: areaId === 'no_area' ? null : areaId,
+                device_count: devices.length,
+                devices: devices.map(device => ({
+                  entity_id: device.entity_id,
+                  domain: device.entity_id.split('.')[0],
+                  state: device.state,
+                  friendly_name: device.attributes?.friendly_name || device.entity_id,
+                })),
+              })),
+            };
+          }
+
+          default:
+            return {
+              success: false,
+              message: `Unknown view type: ${params.view}`
+            };
+        }
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+      }
+    }
+  };
+  registerTool(deviceRelationshipsTool);
 
   // Add the Home Assistant control tool
   const controlTool = {
@@ -898,10 +1972,34 @@ async function main() {
     }),
     execute: async (params: CommandParams) => {
       try {
+        // First, validate that the entity exists and operation is supported
+        const validationResult = await entityValidator.validateEntityOperation(
+          params.entity_id, 
+          params.command,
+          params
+        );
+
+        if (!validationResult.valid) {
+          return {
+            success: false,
+            message: validationResult.error || 'Entity validation failed',
+            entity_id: params.entity_id,
+            exists: validationResult.exists,
+            current_state: validationResult.currentState
+          };
+        }
+
+        // Capture state before operation
+        const stateBefore = validationResult.currentState;
+
         const domain = params.entity_id.split('.')[0] as keyof typeof DomainSchema.Values;
 
         if (!Object.values(DomainSchema.Values).includes(domain)) {
-          throw new Error(`Unsupported domain: ${domain}`);
+          return {
+            success: false,
+            message: `Unsupported domain: ${domain}`,
+            entity_id: params.entity_id
+          };
         }
 
         const service = params.command;
@@ -976,15 +2074,39 @@ async function main() {
           });
 
           if (!response.ok) {
-            throw new Error(`Failed to execute ${service} for ${params.entity_id}: ${response.statusText}`);
+            const errorText = await response.text();
+            return {
+              success: false,
+              message: `Failed to execute ${service} for ${params.entity_id}: ${response.status} ${response.statusText}`,
+              entity_id: params.entity_id,
+              error_details: errorText,
+              state_before: stateBefore
+            };
           }
+
+          // Verify state change (wait a moment for state to update)
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          const stateAfterValidation = await entityValidator.validateEntityExists(params.entity_id);
+          const stateAfter = stateAfterValidation.currentState;
 
           return {
             success: true,
-            message: `Successfully executed ${service} for ${params.entity_id}`
+            message: `Successfully executed ${service} for ${params.entity_id}`,
+            entity_id: params.entity_id,
+            state_before: stateBefore,
+            state_after: stateAfter,
+            state_changed: stateBefore !== stateAfter,
+            operation: service,
+            attributes: stateAfterValidation.attributes
           };
         } catch (error) {
-          throw new Error(`Failed to execute ${service} for ${params.entity_id}: ${error instanceof Error ? error.message : 'Unknown error occurred'}`);
+          return {
+            success: false,
+            message: `Failed to execute ${service} for ${params.entity_id}: ${error instanceof Error ? error.message : 'Unknown error occurred'}`,
+            entity_id: params.entity_id,
+            state_before: stateBefore,
+            error_type: 'network_error'
+          };
         }
       } catch (error) {
         return {
@@ -2192,6 +3314,41 @@ automation:
             throw new Error('Entity ID is required for install, skip, and clear_skipped actions');
           }
 
+          // Validate entity exists and is an update entity
+          const validationResult = await entityValidator.validateEntityExists(params.entity_id);
+          if (!validationResult.valid) {
+            return {
+              success: false,
+              message: validationResult.error || 'Entity validation failed',
+              entity_id: params.entity_id
+            };
+          }
+
+          // Validate it's an update entity
+          const [domain] = params.entity_id.split('.');
+          if (domain !== 'update') {
+            return {
+              success: false,
+              message: `Entity '${params.entity_id}' is not an update entity`,
+              entity_id: params.entity_id,
+              current_domain: domain
+            };
+          }
+
+          // Check if update is available for install action
+          if (params.action === 'install' && validationResult.currentState === 'off') {
+            return {
+              success: false,
+              message: `No update available for ${params.entity_id}`,
+              entity_id: params.entity_id,
+              current_state: validationResult.currentState,
+              installed_version: validationResult.attributes?.installed_version,
+              latest_version: validationResult.attributes?.latest_version
+            };
+          }
+
+          const stateBefore = validationResult.currentState;
+
           let service = '';
           const serviceData: Record<string, any> = {
             entity_id: params.entity_id,
@@ -2225,13 +3382,38 @@ automation:
           });
 
           if (!response.ok) {
-            throw new Error(`Failed to ${params.action} update: ${response.statusText}`);
+            const errorText = await response.text();
+            return {
+              success: false,
+              message: `Failed to ${params.action} update: ${response.status} ${response.statusText}`,
+              entity_id: params.entity_id,
+              error_details: errorText,
+              state_before: stateBefore
+            };
           }
 
           const responseData = await response.json();
+
+          // Verify state change for certain operations
+          let stateAfter = stateBefore;
+          let stateChanged = false;
+          
+          if (params.action === 'install' || params.action === 'skip') {
+            // Wait a moment and check state
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            const stateAfterValidation = await entityValidator.validateEntityExists(params.entity_id);
+            stateAfter = stateAfterValidation.currentState || stateBefore;
+            stateChanged = stateBefore !== stateAfter;
+          }
+
           return {
             success: true,
             message: `Successfully executed ${params.action} for ${params.entity_id}`,
+            entity_id: params.entity_id,
+            action: params.action,
+            state_before: stateBefore,
+            state_after: stateAfter,
+            state_changed: stateChanged,
             data: responseData,
           };
         }
