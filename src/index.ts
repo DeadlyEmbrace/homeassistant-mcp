@@ -4235,28 +4235,57 @@ automation:
             throw new Error('Action configuration is required for create action');
           }
 
+          // Parse triggers and action_config if they are JSON strings
+          let triggers = params.triggers;
+          let actionConfig = params.action_config;
+          let condition = params.condition;
+
+          if (typeof triggers === 'string') {
+            try {
+              triggers = JSON.parse(triggers);
+            } catch (error) {
+              throw new Error('Invalid JSON format in triggers parameter');
+            }
+          }
+
+          if (typeof actionConfig === 'string') {
+            try {
+              actionConfig = JSON.parse(actionConfig);
+            } catch (error) {
+              throw new Error('Invalid JSON format in action_config parameter');
+            }
+          }
+
+          if (typeof condition === 'string') {
+            try {
+              condition = JSON.parse(condition);
+            } catch (error) {
+              throw new Error('Invalid JSON format in condition parameter');
+            }
+          }
+
           // Build automation configuration
           const automationId = params.alias.toLowerCase().replace(/[^a-z0-9]/g, '_');
           const automationConfig: any = {
             id: automationId,
             alias: params.alias,
             mode: params.mode || 'single',
-            triggers: params.triggers,
-            action: params.action_config
+            trigger: triggers,  // Home Assistant API expects 'trigger' not 'triggers'
+            action: actionConfig  // Home Assistant API expects 'action' not 'action_config'
           };
 
           if (params.description) {
             automationConfig.description = params.description;
           }
-          if (params.condition) {
-            automationConfig.condition = params.condition;
+          if (condition) {
+            automationConfig.condition = condition;
           }
 
           // First, validate the configuration via WebSocket if available
           if (wsClient) {
             try {
               const validation = await wsClient.validateConfig(
-                automationConfig.triggers,
+                automationConfig.trigger,  // Use 'trigger' not 'triggers'
                 automationConfig.condition,
                 automationConfig.action
               );
