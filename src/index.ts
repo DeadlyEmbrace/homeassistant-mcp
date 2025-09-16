@@ -5075,6 +5075,658 @@ automation:
   registerTool(automationTool);
   tools.push(automationTool);
 
+  // Add the automation category assignment tool
+  const automationCategoryTool = {
+    name: 'assign_automation_category',
+    description: 'Assign or update the category for a Home Assistant automation (supports both predefined and custom categories)',
+    parameters: z.object({
+      automation_id: z.string().describe('The automation entity ID (e.g., automation.my_automation)'),
+      category: z.string().describe('The category to assign to the automation (predefined categories or custom text)'),
+      is_custom: z.boolean().default(false).optional().describe('Set to true if using a custom category name'),
+      verify_automation_exists: z.boolean().default(true).optional()
+        .describe('Verify that the automation exists before assignment'),
+    }),
+    execute: async (params: {
+      automation_id: string;
+      category: string;
+      is_custom?: boolean;
+      verify_automation_exists?: boolean;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not connected');
+        }
+
+        // Define predefined categories
+        const predefinedCategories = [
+          'light', 'switch', 'fan', 'cover', 'climate', 'lock', 'security', 'camera', 
+          'media_player', 'sensor', 'vacuum', 'water_heater', 'lawn_mower', 'humidifier',
+          'alarm_control_panel', 'notify', 'scene', 'script', 'automation', 'device_tracker',
+          'person', 'zone', 'weather', 'calendar', 'schedule', 'energy', 'update',
+          'button', 'number', 'select', 'text', 'datetime', 'time', 'date', 'other'
+        ];
+
+        // Validate category if not custom
+        if (!params.is_custom && !predefinedCategories.includes(params.category)) {
+          return {
+            success: false,
+            message: `Invalid predefined category '${params.category}'. Use is_custom: true for custom categories, or choose from: ${predefinedCategories.join(', ')}`,
+            automation_id: params.automation_id,
+            category: params.category,
+            available_predefined: predefinedCategories,
+            suggestion: 'Set is_custom: true to use this as a custom category'
+          };
+        }
+
+        // Validate custom category format
+        if (params.is_custom) {
+          if (params.category.length < 1 || params.category.length > 50) {
+            return {
+              success: false,
+              message: 'Custom category must be between 1 and 50 characters',
+              automation_id: params.automation_id,
+              category: params.category,
+            };
+          }
+          
+          // Basic validation for reasonable category names
+          if (!/^[a-zA-Z0-9_\-\s]+$/.test(params.category)) {
+            return {
+              success: false,
+              message: 'Custom category can only contain letters, numbers, spaces, hyphens, and underscores',
+              automation_id: params.automation_id,
+              category: params.category,
+            };
+          }
+        }
+
+        // Verify automation exists if requested
+        if (params.verify_automation_exists) {
+          const stateResponse = await fetch(`${HASS_HOST}/api/states/${params.automation_id}`, {
+            headers: {
+              Authorization: `Bearer ${HASS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+          });
+
+          if (!stateResponse.ok) {
+            if (stateResponse.status === 404) {
+              return {
+                success: false,
+                message: `Automation '${params.automation_id}' not found`,
+                automation_id: params.automation_id,
+              };
+            }
+            throw new Error(`Failed to fetch automation state: ${stateResponse.statusText}`);
+          }
+
+          const automationState = await stateResponse.json() as HassState;
+          if (!automationState.entity_id.startsWith('automation.')) {
+            return {
+              success: false,
+              message: `Entity '${params.automation_id}' is not an automation`,
+              automation_id: params.automation_id,
+            };
+          }
+        }
+
+        // Get entity registry to find the automation entry
+        const entityRegistry = await wsClient.callWS({ type: 'config/entity_registry/list' }) as Array<{
+          entity_id: string; 
+          categories: { [domain: string]: string }; 
+          [key: string]: any
+        }>;
+        
+        const entityEntry = entityRegistry.find((entry: any) => entry.entity_id === params.automation_id);
+
+        if (!entityEntry) {
+          return {
+            success: false,
+            message: `Automation '${params.automation_id}' not found in entity registry`,
+            automation_id: params.automation_id,
+          };
+        }
+
+        // Check current category
+        const currentCategory = entityEntry.categories?.automation;
+        if (currentCategory === params.category) {
+          return {
+            success: false,
+            message: `Automation '${params.automation_id}' already has category '${params.category}' assigned`,
+            automation_id: params.automation_id,
+            current_category: currentCategory,
+          };
+        }
+
+        // Update automation category using WebSocket
+        try {
+          let categoryId = params.category;
+
+          // If it's a custom category, we need to create it first or find existing ID
+          if (params.is_custom) {
+            // Get category registry to see if this custom category already exists
+            try {
+              const categoryRegistry = await wsClient.callWS({ 
+                type: 'config/category_registry/list',
+                scope: 'automation'
+              }) as Array<{
+                category_id: string;
+                name: string;
+                icon?: string;
+                [key: string]: any
+              }>;
+
+              // Look for existing category with this name
+              const existingCategory = categoryRegistry.find(cat => cat.name === params.category);
+              
+              if (existingCategory) {
+                categoryId = existingCategory.category_id;
+              } else {
+                // Create new custom category
+                try {
+                  const createResult = await wsClient.callWS({
+                    type: 'config/category_registry/create',
+                    scope: 'automation',
+                    name: params.category,
+                    icon: null
+                  });
+                  categoryId = createResult.category_id;
+                } catch (createError) {
+                  return {
+                    success: false,
+                    message: `Failed to create custom category '${params.category}': ${createError instanceof Error ? createError.message : 'Unknown error'}`,
+                    automation_id: params.automation_id,
+                    category: params.category,
+                  };
+                }
+              }
+            } catch (registryError) {
+              return {
+                success: false,
+                message: `Failed to access category registry: ${registryError instanceof Error ? registryError.message : 'Unknown error'}`,
+                automation_id: params.automation_id,
+                category: params.category,
+              };
+            }
+          } else {
+            // For predefined categories, we need to find the category ID
+            try {
+              const categoryRegistry = await wsClient.callWS({ 
+                type: 'config/category_registry/list',
+                scope: 'automation'
+              }) as Array<{
+                category_id: string;
+                name: string;
+                icon?: string;
+                [key: string]: any
+              }>;
+
+              const existingCategory = categoryRegistry.find(cat => cat.name === params.category);
+              
+              if (existingCategory) {
+                categoryId = existingCategory.category_id;
+              } else {
+                // Predefined category doesn't exist in registry, create it
+                try {
+                  const createResult = await wsClient.callWS({
+                    type: 'config/category_registry/create',
+                    scope: 'automation',
+                    name: params.category,
+                    icon: null
+                  });
+                  categoryId = createResult.category_id;
+                } catch (createError) {
+                  return {
+                    success: false,
+                    message: `Failed to create predefined category '${params.category}': ${createError instanceof Error ? createError.message : 'Unknown error'}`,
+                    automation_id: params.automation_id,
+                    category: params.category,
+                  };
+                }
+              }
+            } catch (registryError) {
+              return {
+                success: false,
+                message: `Failed to access category registry: ${registryError instanceof Error ? registryError.message : 'Unknown error'}`,
+                automation_id: params.automation_id,
+                category: params.category,
+              };
+            }
+          }
+
+          // Now update the entity with the category ID
+          const updateResult = await wsClient.callWS({
+            type: 'config/entity_registry/update',
+            entity_id: params.automation_id,
+            categories: {
+              ...entityEntry.categories,
+              automation: categoryId
+            }
+          });
+
+          return {
+            success: true,
+            message: `Successfully assigned ${params.is_custom ? 'custom ' : ''}category '${params.category}' to automation '${params.automation_id}'`,
+            automation_id: params.automation_id,
+            category: params.category,
+            category_type: params.is_custom ? 'custom' : 'predefined',
+            category_id: categoryId,
+            previous_category: currentCategory || null,
+            updated_entity: updateResult,
+          };
+
+        } catch (updateError) {
+          return {
+            success: false,
+            message: `Failed to update automation category: ${updateError instanceof Error ? updateError.message : 'Unknown error'}`,
+            automation_id: params.automation_id,
+            category: params.category,
+          };
+        }
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+          automation_id: params.automation_id,
+          category: params.category,
+        };
+      }
+    }
+  };
+  registerTool(automationCategoryTool);
+
+  // Add the automation category management tool
+  const automationCategoryManageTool = {
+    name: 'manage_automation_categories',
+    description: 'List automations by category, get/remove automation categories, and discover custom categories in use',
+    parameters: z.object({
+      action: z.enum(['list_by_category', 'get_category', 'remove_category', 'list_predefined_categories', 'discover_custom_categories', 'list_all_categories_in_use']).describe('Action to perform'),
+      automation_id: z.string().optional().describe('Automation entity ID (required for get_category and remove_category actions)'),
+      category: z.string().optional().describe('Filter by specific category (optional for list_by_category action)'),
+      include_custom: z.boolean().default(true).optional().describe('Include custom categories in results'),
+    }),
+    execute: async (params: {
+      action: string;
+      automation_id?: string;
+      category?: string;
+      include_custom?: boolean;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not connected');
+        }
+
+        const predefinedCategories = [
+          'light', 'switch', 'fan', 'cover', 'climate', 'lock', 'security', 'camera', 
+          'media_player', 'sensor', 'vacuum', 'water_heater', 'lawn_mower', 'humidifier',
+          'alarm_control_panel', 'notify', 'scene', 'script', 'automation', 'device_tracker',
+          'person', 'zone', 'weather', 'calendar', 'schedule', 'energy', 'update',
+          'button', 'number', 'select', 'text', 'datetime', 'time', 'date', 'other'
+        ];
+
+        if (params.action === 'list_predefined_categories') {
+          return {
+            success: true,
+            message: 'Available predefined automation categories',
+            predefined_categories: predefinedCategories,
+            total_predefined: predefinedCategories.length,
+            note: 'You can also create custom categories by setting is_custom: true when assigning'
+          };
+        }
+
+        if (params.action === 'discover_custom_categories') {
+          // Get all automations, entity registry, and category registry
+          const [states, entityRegistry, categoryRegistry] = await Promise.all([
+            fetch(`${HASS_HOST}/api/states`, {
+              headers: {
+                Authorization: `Bearer ${HASS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            }).then(res => res.json()) as Promise<HassState[]>,
+            wsClient.callWS({ type: 'config/entity_registry/list' }) as Promise<Array<{
+              entity_id: string; 
+              categories: { [domain: string]: string }; 
+              [key: string]: any
+            }>>,
+            wsClient.callWS({ 
+              type: 'config/category_registry/list',
+              scope: 'automation'
+            }) as Promise<Array<{
+              category_id: string;
+              name: string;
+              icon?: string;
+              [key: string]: any
+            }>>
+          ]);
+
+          // Create category ID to name mapping
+          const categoryIdToName = new Map<string, string>();
+          categoryRegistry.forEach((category: any) => {
+            categoryIdToName.set(category.category_id, category.name);
+          });
+
+          const automations = states.filter(state => state.entity_id.startsWith('automation.'));
+          const customCategories = new Set<string>();
+          const customCategoryUsage: { [category: string]: string[] } = {};
+
+          automations.forEach(automation => {
+            const entityEntry = entityRegistry.find((entry: any) => entry.entity_id === automation.entity_id);
+            const categoryId = entityEntry?.categories?.automation;
+
+            if (categoryId) {
+              // Resolve category ID to name
+              const categoryName = categoryIdToName.get(categoryId);
+              
+              if (categoryName && !predefinedCategories.includes(categoryName)) {
+                customCategories.add(categoryName);
+                if (!customCategoryUsage[categoryName]) {
+                  customCategoryUsage[categoryName] = [];
+                }
+                customCategoryUsage[categoryName].push(automation.entity_id);
+              }
+            }
+          });
+
+          return {
+            success: true,
+            message: 'Custom categories discovered in your automations',
+            custom_categories: Array.from(customCategories).sort(),
+            custom_category_usage: customCategoryUsage,
+            total_custom_categories: customCategories.size,
+            total_automations_with_custom_categories: Object.values(customCategoryUsage).reduce((sum, arr) => sum + arr.length, 0)
+          };
+        }
+
+        if (params.action === 'list_all_categories_in_use') {
+          // Get all categories currently in use (both predefined and custom)
+          const [states, entityRegistry, categoryRegistry] = await Promise.all([
+            fetch(`${HASS_HOST}/api/states`, {
+              headers: {
+                Authorization: `Bearer ${HASS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            }).then(res => res.json()) as Promise<HassState[]>,
+            wsClient.callWS({ type: 'config/entity_registry/list' }) as Promise<Array<{
+              entity_id: string; 
+              categories: { [domain: string]: string }; 
+              [key: string]: any
+            }>>,
+            wsClient.callWS({ 
+              type: 'config/category_registry/list',
+              scope: 'automation'
+            }) as Promise<Array<{
+              category_id: string;
+              name: string;
+              icon?: string;
+              [key: string]: any
+            }>>
+          ]);
+
+          // Create category ID to name mapping
+          const categoryIdToName = new Map<string, string>();
+          categoryRegistry.forEach((category: any) => {
+            categoryIdToName.set(category.category_id, category.name);
+          });
+
+          const automations = states.filter(state => state.entity_id.startsWith('automation.'));
+          const categoriesInUse = new Set<string>();
+          const categoryUsage: { [category: string]: { automations: string[], type: 'predefined' | 'custom' } } = {};
+
+          automations.forEach(automation => {
+            const entityEntry = entityRegistry.find((entry: any) => entry.entity_id === automation.entity_id);
+            const categoryId = entityEntry?.categories?.automation;
+
+            if (categoryId) {
+              // Resolve category ID to name
+              const categoryName = categoryIdToName.get(categoryId);
+              
+              if (categoryName) {
+                categoriesInUse.add(categoryName);
+                const categoryType = predefinedCategories.includes(categoryName) ? 'predefined' : 'custom';
+                
+                if (!categoryUsage[categoryName]) {
+                  categoryUsage[categoryName] = { automations: [], type: categoryType };
+                }
+                categoryUsage[categoryName].automations.push(automation.entity_id);
+              }
+            }
+          });
+
+          const predefinedInUse = Array.from(categoriesInUse).filter(cat => predefinedCategories.includes(cat)).sort();
+          const customInUse = Array.from(categoriesInUse).filter(cat => !predefinedCategories.includes(cat)).sort();
+
+          return {
+            success: true,
+            message: 'All categories currently in use',
+            categories_in_use: Array.from(categoriesInUse).sort(),
+            predefined_in_use: predefinedInUse,
+            custom_in_use: customInUse,
+            category_usage: categoryUsage,
+            total_categories_in_use: categoriesInUse.size,
+            total_predefined_in_use: predefinedInUse.length,
+            total_custom_in_use: customInUse.length
+          };
+        }
+
+        if (params.action === 'get_category' || params.action === 'remove_category') {
+          if (!params.automation_id) {
+            throw new Error('automation_id is required for get_category and remove_category actions');
+          }
+
+          // Get entity registry and category registry
+          const [entityRegistry, categoryRegistry] = await Promise.all([
+            wsClient.callWS({ type: 'config/entity_registry/list' }) as Promise<Array<{
+              entity_id: string; 
+              categories: { [domain: string]: string }; 
+              [key: string]: any
+            }>>,
+            wsClient.callWS({ 
+              type: 'config/category_registry/list',
+              scope: 'automation'
+            }) as Promise<Array<{
+              category_id: string;
+              name: string;
+              icon?: string;
+              [key: string]: any
+            }>>
+          ]);
+
+          // Create category ID to name mapping
+          const categoryIdToName = new Map<string, string>();
+          categoryRegistry.forEach((category: any) => {
+            categoryIdToName.set(category.category_id, category.name);
+          });
+          
+          const entityEntry = entityRegistry.find((entry: any) => entry.entity_id === params.automation_id);
+
+          if (!entityEntry) {
+            return {
+              success: false,
+              message: `Automation '${params.automation_id}' not found in entity registry`,
+              automation_id: params.automation_id,
+            };
+          }
+
+          const currentCategoryId = entityEntry.categories?.automation;
+          const currentCategoryName = currentCategoryId ? categoryIdToName.get(currentCategoryId) : null;
+
+          if (params.action === 'get_category') {
+            const isCustom = currentCategoryName ? !predefinedCategories.includes(currentCategoryName) : false;
+            
+            return {
+              success: true,
+              message: `Current category for automation '${params.automation_id}'`,
+              automation_id: params.automation_id,
+              category: currentCategoryName || null,
+              category_type: currentCategoryName ? (isCustom ? 'custom' : 'predefined') : null,
+              has_category: !!currentCategoryName,
+            };
+          }
+
+          // Remove category
+          if (!currentCategoryName) {
+            return {
+              success: false,
+              message: `Automation '${params.automation_id}' has no category assigned`,
+              automation_id: params.automation_id,
+            };
+          }
+
+          try {
+            const updatedCategories = { ...entityEntry.categories };
+            delete updatedCategories.automation;
+
+            const updateResult = await wsClient.callWS({
+              type: 'config/entity_registry/update',
+              entity_id: params.automation_id,
+              categories: updatedCategories
+            });
+
+            const wasCustom = currentCategoryName ? !predefinedCategories.includes(currentCategoryName) : false;
+
+            return {
+              success: true,
+              message: `Successfully removed ${wasCustom ? 'custom ' : ''}category '${currentCategoryName}' from automation '${params.automation_id}'`,
+              automation_id: params.automation_id,
+              removed_category: currentCategoryName,
+              removed_category_type: wasCustom ? 'custom' : 'predefined',
+              updated_entity: updateResult,
+            };
+
+          } catch (updateError) {
+            return {
+              success: false,
+              message: `Failed to remove automation category: ${updateError instanceof Error ? updateError.message : 'Unknown error'}`,
+              automation_id: params.automation_id,
+            };
+          }
+        }
+
+        if (params.action === 'list_by_category') {
+          // Get all automations, entity registry, and category registry
+          const [states, entityRegistry, categoryRegistry] = await Promise.all([
+            fetch(`${HASS_HOST}/api/states`, {
+              headers: {
+                Authorization: `Bearer ${HASS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            }).then(res => res.json()) as Promise<HassState[]>,
+            wsClient.callWS({ type: 'config/entity_registry/list' }) as Promise<Array<{
+              entity_id: string; 
+              categories: { [domain: string]: string }; 
+              [key: string]: any
+            }>>,
+            wsClient.callWS({ 
+              type: 'config/category_registry/list',
+              scope: 'automation'
+            }) as Promise<Array<{
+              category_id: string;
+              name: string;
+              icon?: string;
+              [key: string]: any
+            }>>
+          ]);
+
+          // Create category ID to name mapping
+          const categoryIdToName = new Map<string, string>();
+          categoryRegistry.forEach((category: any) => {
+            categoryIdToName.set(category.category_id, category.name);
+          });
+
+          const automations = states.filter(state => state.entity_id.startsWith('automation.'));
+          
+          const automationsByCategory: { [category: string]: any[] } = {};
+          const uncategorizedAutomations: any[] = [];
+
+          automations.forEach(automation => {
+            const entityEntry = entityRegistry.find((entry: any) => entry.entity_id === automation.entity_id);
+            const categoryId = entityEntry?.categories?.automation;
+            
+            // Resolve category ID to name
+            const categoryName = categoryId ? categoryIdToName.get(categoryId) : null;
+            const isCustom = categoryName ? !predefinedCategories.includes(categoryName) : false;
+
+            const automationInfo = {
+              entity_id: automation.entity_id,
+              name: automation.attributes.friendly_name || automation.entity_id.split('.')[1],
+              state: automation.state,
+              description: automation.attributes.description || null,
+              category: categoryName || null,
+              category_type: categoryName ? (isCustom ? 'custom' : 'predefined') : null,
+            };
+
+            // Filter by custom/predefined if requested
+            if (!params.include_custom && isCustom) {
+              return; // Skip custom categories if not included
+            }
+
+            if (categoryName) {
+              if (!automationsByCategory[categoryName]) {
+                automationsByCategory[categoryName] = [];
+              }
+              automationsByCategory[categoryName].push(automationInfo);
+            } else {
+              uncategorizedAutomations.push(automationInfo);
+            }
+          });
+
+          // Filter by specific category if requested
+          if (params.category) {
+            const categoryAutomations = automationsByCategory[params.category] || [];
+            const isRequestedCategoryCustom = !predefinedCategories.includes(params.category);
+            
+            return {
+              success: true,
+              message: `Automations in ${isRequestedCategoryCustom ? 'custom ' : ''}category '${params.category}'`,
+              category: params.category,
+              category_type: isRequestedCategoryCustom ? 'custom' : 'predefined',
+              automations: categoryAutomations,
+              total_automations: categoryAutomations.length,
+            };
+          }
+
+          // Separate predefined and custom categories
+          const predefinedCats: { [category: string]: any[] } = {};
+          const customCats: { [category: string]: any[] } = {};
+
+          Object.entries(automationsByCategory).forEach(([category, automationList]) => {
+            if (predefinedCategories.includes(category)) {
+              predefinedCats[category] = automationList;
+            } else {
+              customCats[category] = automationList;
+            }
+          });
+
+          return {
+            success: true,
+            message: 'Automations grouped by category',
+            predefined_categories: predefinedCats,
+            custom_categories: customCats,
+            uncategorized_automations: uncategorizedAutomations,
+            total_predefined_categories: Object.keys(predefinedCats).length,
+            total_custom_categories: Object.keys(customCats).length,
+            total_categorized: Object.values(automationsByCategory).reduce((sum, arr) => sum + arr.length, 0),
+            total_uncategorized: uncategorizedAutomations.length,
+            total_automations: automations.length,
+          };
+        }
+
+        throw new Error(`Unknown action: ${params.action}`);
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+          action: params.action,
+          automation_id: params.automation_id,
+          category: params.category,
+        };
+      }
+    }
+  };
+  registerTool(automationCategoryManageTool);
+
   // Add the addon tool
   const addonTool = {
     name: 'addon',
