@@ -1549,6 +1549,800 @@ async function main() {
   };
   registerTool(searchDevicesByAreaTool);
 
+  // Add comprehensive label management tools
+  const getAvailableLabelsTool = {
+    name: 'get_available_labels',
+    description: 'Get all available labels in Home Assistant with their properties and usage statistics',
+    parameters: z.object({
+      include_usage_stats: z.boolean().default(true).optional()
+        .describe('Include statistics about how many devices/entities use each label'),
+      sort_by: z.enum(['name', 'usage', 'created', 'color']).default('name').optional()
+        .describe('Sort labels by name, usage count, creation date, or color'),
+      filter_by_color: z.string().optional()
+        .describe('Filter labels by color (e.g., "accent", "primary", "red")'),
+    }),
+    execute: async (params: {
+      include_usage_stats?: boolean;
+      sort_by?: 'name' | 'usage' | 'created' | 'color';
+      filter_by_color?: string;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        // Get labels and registries for usage stats
+        const labelsPromise = wsClient.callWS({ type: 'config/label_registry/list' });
+        let entitiesPromise, devicesPromise;
+        
+        if (params.include_usage_stats !== false) {
+          entitiesPromise = wsClient.callWS({ type: 'config/entity_registry/list' });
+          devicesPromise = wsClient.callWS({ type: 'config/device_registry/list' });
+        }
+
+        const [labels, entities, devices] = await Promise.all([
+          labelsPromise,
+          entitiesPromise || Promise.resolve([]),
+          devicesPromise || Promise.resolve([])
+        ]);
+
+        if (!Array.isArray(labels)) {
+          throw new Error('Invalid response from label registry');
+        }
+
+        let processedLabels = labels.map((label: any) => ({
+          label_id: label.label_id,
+          name: label.name,
+          description: label.description,
+          color: label.color,
+          icon: label.icon,
+          created_at: label.created_at,
+          modified_at: label.modified_at,
+          entity_count: 0,
+          device_count: 0,
+          total_usage: 0,
+        }));
+
+        // Filter by color if specified
+        if (params.filter_by_color) {
+          processedLabels = processedLabels.filter((label: any) => 
+            label.color === params.filter_by_color
+          );
+        }
+
+        // Calculate usage statistics if requested
+        if (params.include_usage_stats !== false && Array.isArray(entities) && Array.isArray(devices)) {
+          const labelUsage: Record<string, { entities: number; devices: number }> = {};
+          
+          // Count entity usage
+          entities.forEach((entity: any) => {
+            if (entity.labels && Array.isArray(entity.labels)) {
+              entity.labels.forEach((labelId: string) => {
+                if (!labelUsage[labelId]) labelUsage[labelId] = { entities: 0, devices: 0 };
+                labelUsage[labelId].entities++;
+              });
+            }
+          });
+
+          // Count device usage
+          devices.forEach((device: any) => {
+            if (device.labels && Array.isArray(device.labels)) {
+              device.labels.forEach((labelId: string) => {
+                if (!labelUsage[labelId]) labelUsage[labelId] = { entities: 0, devices: 0 };
+                labelUsage[labelId].devices++;
+              });
+            }
+          });
+
+          // Update processed labels with usage stats
+          processedLabels = processedLabels.map((label: any) => {
+            const usage = labelUsage[label.label_id] || { entities: 0, devices: 0 };
+            return {
+              ...label,
+              entity_count: usage.entities,
+              device_count: usage.devices,
+              total_usage: usage.entities + usage.devices,
+            };
+          });
+        }
+
+        // Sort labels
+        const sortBy = params.sort_by || 'name';
+        processedLabels.sort((a: any, b: any) => {
+          switch (sortBy) {
+            case 'usage':
+              return b.total_usage - a.total_usage;
+            case 'created':
+              return b.created_at - a.created_at;
+            case 'color':
+              return (a.color || '').localeCompare(b.color || '');
+            default: // 'name'
+              return a.name.localeCompare(b.name);
+          }
+        });
+
+        // Calculate summary statistics
+        const totalLabels = processedLabels.length;
+        const labelsWithUsage = processedLabels.filter((label: any) => label.total_usage > 0).length;
+        const colorDistribution: Record<string, number> = {};
+        
+        processedLabels.forEach((label: any) => {
+          const color = label.color || 'no_color';
+          colorDistribution[color] = (colorDistribution[color] || 0) + 1;
+        });
+
+        return {
+          success: true,
+          total_labels: totalLabels,
+          labels_in_use: labelsWithUsage,
+          labels_unused: totalLabels - labelsWithUsage,
+          labels: processedLabels,
+          color_distribution: colorDistribution,
+          filters_applied: {
+            sort_by: sortBy,
+            filter_by_color: params.filter_by_color,
+            include_usage_stats: params.include_usage_stats ?? true,
+          },
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+        };
+      }
+    }
+  };
+  registerTool(getAvailableLabelsTool);
+
+  const getDeviceLabelsTool = {
+    name: 'get_device_labels',
+    description: 'Get labels assigned to specific devices or entities, with detailed label information',
+    parameters: z.object({
+      entity_ids: z.array(z.string()).optional()
+        .describe('Array of entity IDs to get labels for'),
+      device_ids: z.array(z.string()).optional()
+        .describe('Array of device IDs to get labels for'),
+      device_names: z.array(z.string()).optional()
+        .describe('Array of device names to search for and get labels'),
+      include_label_details: z.boolean().default(true).optional()
+        .describe('Include full label information (name, color, icon, etc.)'),
+      show_unlabeled: z.boolean().default(false).optional()
+        .describe('Include devices/entities without any labels'),
+    }),
+    execute: async (params: {
+      entity_ids?: string[];
+      device_ids?: string[];
+      device_names?: string[];
+      include_label_details?: boolean;
+      show_unlabeled?: boolean;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        if (!params.entity_ids && !params.device_ids && !params.device_names) {
+          throw new Error('Must provide at least one of: entity_ids, device_ids, or device_names');
+        }
+
+        // Get all necessary data
+        const [entities, devices, labels] = await Promise.all([
+          wsClient.callWS({ type: 'config/entity_registry/list' }),
+          wsClient.callWS({ type: 'config/device_registry/list' }),
+          params.include_label_details !== false 
+            ? wsClient.callWS({ type: 'config/label_registry/list' })
+            : Promise.resolve([])
+        ]);
+
+        if (!Array.isArray(entities) || !Array.isArray(devices)) {
+          throw new Error('Invalid response from Home Assistant registries');
+        }
+
+        // Create label lookup map
+        const labelMap = new Map(labels.map((label: any) => [label.label_id, label]));
+
+        const results: any = {
+          entities: [],
+          devices: [],
+        };
+
+        // Process entity IDs
+        if (params.entity_ids && params.entity_ids.length > 0) {
+          params.entity_ids.forEach(entityId => {
+            const entity = entities.find((e: any) => e.entity_id === entityId);
+            if (entity) {
+              const entityLabels = entity.labels || [];
+              
+              if (entityLabels.length > 0 || params.show_unlabeled) {
+                const labelDetails = params.include_label_details !== false
+                  ? entityLabels.map((labelId: string) => labelMap.get(labelId)).filter(Boolean)
+                  : entityLabels;
+
+                results.entities.push({
+                  entity_id: entity.entity_id,
+                  name: entity.name,
+                  area_id: entity.area_id,
+                  device_id: entity.device_id,
+                  labels: entityLabels,
+                  label_details: params.include_label_details !== false ? labelDetails : undefined,
+                });
+              }
+            }
+          });
+        }
+
+        // Process device IDs  
+        if (params.device_ids && params.device_ids.length > 0) {
+          params.device_ids.forEach(deviceId => {
+            const device = devices.find((d: any) => d.id === deviceId);
+            if (device) {
+              const deviceLabels = device.labels || [];
+              
+              if (deviceLabels.length > 0 || params.show_unlabeled) {
+                const labelDetails = params.include_label_details !== false
+                  ? deviceLabels.map((labelId: string) => labelMap.get(labelId)).filter(Boolean)
+                  : deviceLabels;
+
+                results.devices.push({
+                  device_id: device.id,
+                  name: device.name,
+                  name_by_user: device.name_by_user,
+                  manufacturer: device.manufacturer,
+                  model: device.model,
+                  area_id: device.area_id,
+                  labels: deviceLabels,
+                  label_details: params.include_label_details !== false ? labelDetails : undefined,
+                });
+              }
+            }
+          });
+        }
+
+        // Process device names
+        if (params.device_names && params.device_names.length > 0) {
+          params.device_names.forEach(deviceName => {
+            const device = devices.find((d: any) => 
+              d.name?.toLowerCase().includes(deviceName.toLowerCase()) ||
+              d.name_by_user?.toLowerCase().includes(deviceName.toLowerCase())
+            );
+            
+            if (device) {
+              const deviceLabels = device.labels || [];
+              
+              if (deviceLabels.length > 0 || params.show_unlabeled) {
+                const labelDetails = params.include_label_details !== false
+                  ? deviceLabels.map((labelId: string) => labelMap.get(labelId)).filter(Boolean)
+                  : deviceLabels;
+
+                results.devices.push({
+                  device_id: device.id,
+                  name: device.name,
+                  name_by_user: device.name_by_user,
+                  manufacturer: device.manufacturer,
+                  model: device.model,
+                  area_id: device.area_id,
+                  labels: deviceLabels,
+                  label_details: params.include_label_details !== false ? labelDetails : undefined,
+                  matched_name: deviceName,
+                });
+              }
+            }
+          });
+        }
+
+        // Remove duplicates from devices array
+        const uniqueDevices: any[] = [];
+        const seenDeviceIds = new Set();
+        results.devices.forEach((device: any) => {
+          if (!seenDeviceIds.has(device.device_id)) {
+            uniqueDevices.push(device);
+            seenDeviceIds.add(device.device_id);
+          }
+        });
+        results.devices = uniqueDevices;
+
+        return {
+          success: true,
+          total_entities: results.entities.length,
+          total_devices: results.devices.length,
+          ...results,
+          search_criteria: {
+            entity_ids: params.entity_ids,
+            device_ids: params.device_ids,
+            device_names: params.device_names,
+            include_label_details: params.include_label_details ?? true,
+            show_unlabeled: params.show_unlabeled ?? false,
+          },
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+        };
+      }
+    }
+  };
+  registerTool(getDeviceLabelsTool);
+
+  const setDeviceLabelsTool = {
+    name: 'set_device_labels',
+    description: 'Add or set labels for devices and entities. Can create new labels automatically.',
+    parameters: z.object({
+      entity_ids: z.array(z.string()).optional()
+        .describe('Array of entity IDs to set labels for'),
+      device_ids: z.array(z.string()).optional()
+        .describe('Array of device IDs to set labels for'),
+      device_names: z.array(z.string()).optional()
+        .describe('Array of device names to search for and set labels'),
+      labels: z.array(z.string())
+        .describe('Array of label names to assign'),
+      label_color: z.string().optional()
+        .describe('Color for new labels (e.g., "accent", "primary", "red"). Only used when creating new labels.'),
+      replace_existing: z.boolean().default(false).optional()
+        .describe('If true, replace all existing labels. If false, add to existing labels.'),
+      create_missing_labels: z.boolean().default(true).optional()
+        .describe('Automatically create labels that don\'t exist'),
+    }),
+    execute: async (params: {
+      entity_ids?: string[];
+      device_ids?: string[];
+      device_names?: string[];
+      labels: string[];
+      label_color?: string;
+      replace_existing?: boolean;
+      create_missing_labels?: boolean;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        if (!params.entity_ids && !params.device_ids && !params.device_names) {
+          throw new Error('Must provide at least one of: entity_ids, device_ids, or device_names');
+        }
+
+        if (!params.labels || params.labels.length === 0) {
+          throw new Error('Must provide at least one label to set');
+        }
+
+        // Get current registries
+        const [entities, devices, existingLabels] = await Promise.all([
+          wsClient.callWS({ type: 'config/entity_registry/list' }),
+          wsClient.callWS({ type: 'config/device_registry/list' }),
+          wsClient.callWS({ type: 'config/label_registry/list' })
+        ]);
+
+        if (!Array.isArray(entities) || !Array.isArray(devices) || !Array.isArray(existingLabels)) {
+          throw new Error('Invalid response from Home Assistant registries');
+        }
+
+        // Create label name to ID mapping
+        const labelNameToId = new Map(existingLabels.map((label: any) => [label.name.toLowerCase(), label.label_id]));
+        
+        // Determine which labels need to be created
+        const labelsToCreate: string[] = [];
+        const finalLabelIds: string[] = [];
+
+        for (const labelName of params.labels) {
+          const existingLabelId = labelNameToId.get(labelName.toLowerCase());
+          if (existingLabelId) {
+            finalLabelIds.push(existingLabelId);
+          } else {
+            if (params.create_missing_labels !== false) {
+              labelsToCreate.push(labelName);
+            } else {
+              throw new Error(`Label "${labelName}" does not exist and create_missing_labels is false`);
+            }
+          }
+        }
+
+        // Create missing labels
+        for (const labelName of labelsToCreate) {
+          try {
+            const createResult = await wsClient.callWS({
+              type: 'config/label_registry/create',
+              name: labelName,
+              color: params.label_color || null,
+              icon: null,
+              description: null,
+            });
+            
+            if (createResult && createResult.label_id) {
+              finalLabelIds.push(createResult.label_id);
+            }
+          } catch (error) {
+            console.warn(`Failed to create label "${labelName}":`, error);
+          }
+        }
+
+        const results: any = {
+          entities_updated: [],
+          devices_updated: [],
+          labels_created: labelsToCreate,
+          errors: [],
+        };
+
+        // Helper function to update labels
+        const updateLabels = (current: string[], new_labels: string[], replace: boolean) => {
+          if (replace) {
+            return new_labels;
+          } else {
+            const combined = [...(current || []), ...new_labels];
+            return [...new Set(combined)]; // Remove duplicates
+          }
+        };
+
+        // Process entities
+        if (params.entity_ids && params.entity_ids.length > 0) {
+          for (const entityId of params.entity_ids) {
+            const entity = entities.find((e: any) => e.entity_id === entityId);
+            if (entity) {
+              try {
+                const updatedLabels = updateLabels(entity.labels || [], finalLabelIds, params.replace_existing || false);
+                
+                await wsClient.callWS({
+                  type: 'config/entity_registry/update',
+                  entity_id: entityId,
+                  labels: updatedLabels,
+                });
+
+                results.entities_updated.push({
+                  entity_id: entityId,
+                  name: entity.name,
+                  previous_labels: entity.labels || [],
+                  new_labels: updatedLabels,
+                });
+              } catch (error) {
+                results.errors.push({
+                  type: 'entity',
+                  id: entityId,
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                });
+              }
+            } else {
+              results.errors.push({
+                type: 'entity',
+                id: entityId,
+                error: 'Entity not found',
+              });
+            }
+          }
+        }
+
+        // Process devices
+        if (params.device_ids && params.device_ids.length > 0) {
+          for (const deviceId of params.device_ids) {
+            const device = devices.find((d: any) => d.id === deviceId);
+            if (device) {
+              try {
+                const updatedLabels = updateLabels(device.labels || [], finalLabelIds, params.replace_existing || false);
+                
+                await wsClient.callWS({
+                  type: 'config/device_registry/update',
+                  device_id: deviceId,
+                  labels: updatedLabels,
+                });
+
+                results.devices_updated.push({
+                  device_id: deviceId,
+                  name: device.name,
+                  previous_labels: device.labels || [],
+                  new_labels: updatedLabels,
+                });
+              } catch (error) {
+                results.errors.push({
+                  type: 'device',
+                  id: deviceId,
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                });
+              }
+            } else {
+              results.errors.push({
+                type: 'device',
+                id: deviceId,
+                error: 'Device not found',
+              });
+            }
+          }
+        }
+
+        // Process device names
+        if (params.device_names && params.device_names.length > 0) {
+          for (const deviceName of params.device_names) {
+            const device = devices.find((d: any) => 
+              d.name?.toLowerCase().includes(deviceName.toLowerCase()) ||
+              d.name_by_user?.toLowerCase().includes(deviceName.toLowerCase())
+            );
+            
+            if (device) {
+              try {
+                const updatedLabels = updateLabels(device.labels || [], finalLabelIds, params.replace_existing || false);
+                
+                await wsClient.callWS({
+                  type: 'config/device_registry/update',
+                  device_id: device.id,
+                  labels: updatedLabels,
+                });
+
+                results.devices_updated.push({
+                  device_id: device.id,
+                  name: device.name,
+                  matched_name: deviceName,
+                  previous_labels: device.labels || [],
+                  new_labels: updatedLabels,
+                });
+              } catch (error) {
+                results.errors.push({
+                  type: 'device',
+                  name: deviceName,
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                });
+              }
+            } else {
+              results.errors.push({
+                type: 'device',
+                name: deviceName,
+                error: 'Device not found',
+              });
+            }
+          }
+        }
+
+        return {
+          success: results.errors.length === 0 || (results.entities_updated.length > 0 || results.devices_updated.length > 0),
+          total_entities_updated: results.entities_updated.length,
+          total_devices_updated: results.devices_updated.length,
+          total_labels_created: results.labels_created.length,
+          total_errors: results.errors.length,
+          ...results,
+          operation_details: {
+            labels_requested: params.labels,
+            final_label_ids: finalLabelIds,
+            replace_existing: params.replace_existing || false,
+            create_missing_labels: params.create_missing_labels ?? true,
+          },
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+        };
+      }
+    }
+  };
+  registerTool(setDeviceLabelsTool);
+
+  const removeDeviceLabelsTool = {
+    name: 'remove_device_labels', 
+    description: 'Remove specific labels from devices and entities, or remove all labels',
+    parameters: z.object({
+      entity_ids: z.array(z.string()).optional()
+        .describe('Array of entity IDs to remove labels from'),
+      device_ids: z.array(z.string()).optional()
+        .describe('Array of device IDs to remove labels from'),
+      device_names: z.array(z.string()).optional()
+        .describe('Array of device names to search for and remove labels from'),
+      labels: z.array(z.string()).optional()
+        .describe('Array of label names to remove. If not provided, removes all labels.'),
+      remove_all_labels: z.boolean().default(false).optional()
+        .describe('If true, remove all labels regardless of the labels parameter'),
+    }),
+    execute: async (params: {
+      entity_ids?: string[];
+      device_ids?: string[];
+      device_names?: string[];
+      labels?: string[];
+      remove_all_labels?: boolean;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        if (!params.entity_ids && !params.device_ids && !params.device_names) {
+          throw new Error('Must provide at least one of: entity_ids, device_ids, or device_names');
+        }
+
+        if (!params.remove_all_labels && (!params.labels || params.labels.length === 0)) {
+          throw new Error('Must provide labels to remove or set remove_all_labels to true');
+        }
+
+        // Get current registries
+        const [entities, devices, existingLabels] = await Promise.all([
+          wsClient.callWS({ type: 'config/entity_registry/list' }),
+          wsClient.callWS({ type: 'config/device_registry/list' }),
+          wsClient.callWS({ type: 'config/label_registry/list' })
+        ]);
+
+        if (!Array.isArray(entities) || !Array.isArray(devices) || !Array.isArray(existingLabels)) {
+          throw new Error('Invalid response from Home Assistant registries');
+        }
+
+        // Create label name to ID mapping for specific label removal
+        let labelIdsToRemove: string[] = [];
+        if (!params.remove_all_labels && params.labels) {
+          const labelNameToId = new Map(existingLabels.map((label: any) => [label.name.toLowerCase(), label.label_id]));
+          
+          for (const labelName of params.labels) {
+            const labelId = labelNameToId.get(labelName.toLowerCase());
+            if (labelId) {
+              labelIdsToRemove.push(labelId);
+            }
+          }
+        }
+
+        const results: any = {
+          entities_updated: [],
+          devices_updated: [],
+          errors: [],
+        };
+
+        // Helper function to remove labels
+        const removeLabels = (current: string[], labelsToRemove: string[], removeAll: boolean) => {
+          if (removeAll) {
+            return [];
+          } else {
+            return (current || []).filter(labelId => !labelsToRemove.includes(labelId));
+          }
+        };
+
+        // Process entities
+        if (params.entity_ids && params.entity_ids.length > 0) {
+          for (const entityId of params.entity_ids) {
+            const entity = entities.find((e: any) => e.entity_id === entityId);
+            if (entity) {
+              try {
+                const currentLabels = entity.labels || [];
+                const updatedLabels = removeLabels(currentLabels, labelIdsToRemove, params.remove_all_labels || false);
+                
+                // Only update if there's a change
+                if (JSON.stringify(currentLabels) !== JSON.stringify(updatedLabels)) {
+                  await wsClient.callWS({
+                    type: 'config/entity_registry/update',
+                    entity_id: entityId,
+                    labels: updatedLabels,
+                  });
+
+                  results.entities_updated.push({
+                    entity_id: entityId,
+                    name: entity.name,
+                    previous_labels: currentLabels,
+                    new_labels: updatedLabels,
+                    labels_removed: currentLabels.filter((id: string) => !updatedLabels.includes(id)),
+                  });
+                }
+              } catch (error) {
+                results.errors.push({
+                  type: 'entity',
+                  id: entityId,
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                });
+              }
+            } else {
+              results.errors.push({
+                type: 'entity',
+                id: entityId,
+                error: 'Entity not found',
+              });
+            }
+          }
+        }
+
+        // Process devices
+        if (params.device_ids && params.device_ids.length > 0) {
+          for (const deviceId of params.device_ids) {
+            const device = devices.find((d: any) => d.id === deviceId);
+            if (device) {
+              try {
+                const currentLabels = device.labels || [];
+                const updatedLabels = removeLabels(currentLabels, labelIdsToRemove, params.remove_all_labels || false);
+                
+                // Only update if there's a change
+                if (JSON.stringify(currentLabels) !== JSON.stringify(updatedLabels)) {
+                  await wsClient.callWS({
+                    type: 'config/device_registry/update',
+                    device_id: deviceId,
+                    labels: updatedLabels,
+                  });
+
+                  results.devices_updated.push({
+                    device_id: deviceId,
+                    name: device.name,
+                    previous_labels: currentLabels,
+                    new_labels: updatedLabels,
+                    labels_removed: currentLabels.filter((id: string) => !updatedLabels.includes(id)),
+                  });
+                }
+              } catch (error) {
+                results.errors.push({
+                  type: 'device',
+                  id: deviceId,
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                });
+              }
+            } else {
+              results.errors.push({
+                type: 'device',
+                id: deviceId,
+                error: 'Device not found',
+              });
+            }
+          }
+        }
+
+        // Process device names
+        if (params.device_names && params.device_names.length > 0) {
+          for (const deviceName of params.device_names) {
+            const device = devices.find((d: any) => 
+              d.name?.toLowerCase().includes(deviceName.toLowerCase()) ||
+              d.name_by_user?.toLowerCase().includes(deviceName.toLowerCase())
+            );
+            
+            if (device) {
+              try {
+                const currentLabels = device.labels || [];
+                const updatedLabels = removeLabels(currentLabels, labelIdsToRemove, params.remove_all_labels || false);
+                
+                // Only update if there's a change
+                if (JSON.stringify(currentLabels) !== JSON.stringify(updatedLabels)) {
+                  await wsClient.callWS({
+                    type: 'config/device_registry/update',
+                    device_id: device.id,
+                    labels: updatedLabels,
+                  });
+
+                  results.devices_updated.push({
+                    device_id: device.id,
+                    name: device.name,
+                    matched_name: deviceName,
+                    previous_labels: currentLabels,
+                    new_labels: updatedLabels,
+                    labels_removed: currentLabels.filter((id: string) => !updatedLabels.includes(id)),
+                  });
+                }
+              } catch (error) {
+                results.errors.push({
+                  type: 'device',
+                  name: deviceName,
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                });
+              }
+            } else {
+              results.errors.push({
+                type: 'device',
+                name: deviceName,
+                error: 'Device not found',
+              });
+            }
+          }
+        }
+
+        return {
+          success: results.errors.length === 0 || (results.entities_updated.length > 0 || results.devices_updated.length > 0),
+          total_entities_updated: results.entities_updated.length,
+          total_devices_updated: results.devices_updated.length,
+          total_errors: results.errors.length,
+          ...results,
+          operation_details: {
+            labels_to_remove: params.labels,
+            label_ids_to_remove: labelIdsToRemove,
+            remove_all_labels: params.remove_all_labels || false,
+          },
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+        };
+      }
+    }
+  };
+  registerTool(removeDeviceLabelsTool);
+
   // Add the device details tool
   const deviceDetailsTool = {
     name: 'get_device_details',
