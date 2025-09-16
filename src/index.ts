@@ -704,7 +704,7 @@ interface NotifyParams {
 }
 
 interface AutomationParams {
-  action: 'list' | 'toggle' | 'trigger' | 'get_config' | 'get_yaml' | 'create' | 'validate';
+  action: 'list' | 'toggle' | 'trigger' | 'get_config' | 'get_yaml' | 'create' | 'validate' | 'update';
   automation_id?: string;
   // Fields for automation creation
   alias?: string;
@@ -713,6 +713,15 @@ interface AutomationParams {
   triggers?: any;
   condition?: any;
   action_config?: any;
+  // Config object for update action
+  config?: {
+    alias?: string;
+    description?: string;
+    mode?: 'single' | 'restart' | 'queued' | 'parallel';
+    trigger?: any[];
+    condition?: any[];
+    action?: any[];
+  };
   // Validation-only fields
   validate_trigger?: any;
   validate_condition?: any;
@@ -4431,8 +4440,8 @@ async function main() {
     name: 'automation',
     description: 'Manage Home Assistant automations',
     parameters: z.object({
-      action: z.enum(['list', 'toggle', 'trigger', 'get_config', 'get_yaml', 'create', 'validate']).describe('Action to perform with automation'),
-      automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_config, and get_yaml actions)'),
+      action: z.enum(['list', 'toggle', 'trigger', 'get_config', 'get_yaml', 'create', 'validate', 'update']).describe('Action to perform with automation'),
+      automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_config, get_yaml, and update actions)'),
       // Fields for automation creation
       alias: z.string().optional().describe('Automation name/alias (required for create action)'),
       description: z.string().optional().describe('Automation description'),
@@ -4440,6 +4449,15 @@ async function main() {
       triggers: z.any().optional().describe('Automation triggers array (required for create action)'),
       condition: z.any().optional().describe('Automation condition configuration'),
       action_config: z.any().optional().describe('Automation action configuration (required for create action)'),
+      // Config object for update action
+      config: z.object({
+        alias: z.string().optional(),
+        description: z.string().optional(),
+        mode: z.enum(['single', 'restart', 'queued', 'parallel']).optional(),
+        trigger: z.array(z.any()).optional(),
+        condition: z.array(z.any()).optional(),
+        action: z.array(z.any()).optional(),
+      }).optional().describe('Complete automation configuration (required for update action)'),
       // Validation-only fields
       validate_trigger: z.any().optional().describe('Trigger configuration to validate'),
       validate_condition: z.any().optional().describe('Condition configuration to validate'),
@@ -4911,13 +4929,42 @@ automation:
             throw new Error('At least one of validate_trigger, validate_condition, or validate_action is required for validate action');
           }
 
+          // Parse JSON strings if necessary
+          let parsedTrigger = params.validate_trigger;
+          let parsedCondition = params.validate_condition;
+          let parsedAction = params.validate_action;
+
+          if (typeof parsedTrigger === 'string') {
+            try {
+              parsedTrigger = JSON.parse(parsedTrigger);
+            } catch (error) {
+              throw new Error('Invalid JSON format in validate_trigger parameter');
+            }
+          }
+
+          if (typeof parsedCondition === 'string') {
+            try {
+              parsedCondition = JSON.parse(parsedCondition);
+            } catch (error) {
+              throw new Error('Invalid JSON format in validate_condition parameter');
+            }
+          }
+
+          if (typeof parsedAction === 'string') {
+            try {
+              parsedAction = JSON.parse(parsedAction);
+            } catch (error) {
+              throw new Error('Invalid JSON format in validate_action parameter');
+            }
+          }
+
           // Use WebSocket validation if available
           if (wsClient) {
             try {
               const validation = await wsClient.validateConfig(
-                params.validate_trigger,
-                params.validate_condition,
-                params.validate_action
+                parsedTrigger,
+                parsedCondition,
+                parsedAction
               );
 
               return {
@@ -4940,9 +4987,50 @@ automation:
             message: 'WebSocket not available for validation. Full validation requires WebSocket connection.',
             source: 'rest_fallback'
           };
+        } else if (params.action === 'update') {
+          if (!params.automation_id || !params.config) {
+            throw new Error('Automation ID and configuration are required for update action');
+          }
+
+          // Add the automation ID to the config for Home Assistant API
+          const automationId = params.automation_id.replace('automation.', '');
+          const configWithId = {
+            id: automationId,
+            ...params.config
+          };
+
+          const response = await fetch(`${HASS_HOST}/api/config/automation/config/${automationId}`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${HASS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(configWithId),
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to update automation: ${response.statusText}`);
+          }
+
+          // Reload automations to apply changes
+          if (wsClient) {
+            try {
+              await wsClient.callService('automation', 'reload');
+            } catch (reloadError) {
+              // Continue even if reload fails - the update might still have worked
+            }
+          }
+
+          return {
+            success: true,
+            message: `Successfully updated automation: ${params.config?.alias || params.automation_id}`,
+            automation_id: automationId,
+            entity_id: `automation.${automationId}`,
+            source: 'rest_api_update'
+          };
         } else {
           if (!params.automation_id) {
-            throw new Error('Automation ID is required for toggle, trigger, get_config, and get_yaml actions');
+            throw new Error('Automation ID is required for toggle, trigger, get_config, get_yaml, and update actions');
           }
 
           const service = params.action === 'toggle' ? 'toggle' : 'trigger';
@@ -4970,7 +5058,7 @@ automation:
         }
 
         // This should never be reached due to z.enum validation, but included for safety
-        throw new Error(`Invalid action: ${params.action}. Must be one of: list, toggle, trigger, get_config, get_yaml, create, validate`);
+        throw new Error(`Invalid action: ${params.action}. Must be one of: list, toggle, trigger, get_config, get_yaml, create, validate, update`);
       } catch (error) {
         return {
           success: false,
@@ -5224,13 +5312,19 @@ automation:
               throw new Error('Automation ID and configuration are required for updating automation');
             }
 
-            const response = await fetch(`${HASS_HOST}/api/config/automation/config/${params.automation_id}`, {
-              method: 'PUT',
+            // Add the automation ID to the config for Home Assistant API
+            const configWithId = {
+              id: params.automation_id.replace('automation.', ''),
+              ...params.config
+            };
+
+            const response = await fetch(`${HASS_HOST}/api/config/automation/config/${params.automation_id.replace('automation.', '')}`, {
+              method: 'POST',
               headers: {
                 Authorization: `Bearer ${HASS_TOKEN}`,
                 'Content-Type': 'application/json',
               },
-              body: JSON.stringify(params.config),
+              body: JSON.stringify(configWithId),
             });
 
             if (!response.ok) {
