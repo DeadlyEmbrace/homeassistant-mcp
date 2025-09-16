@@ -1934,6 +1934,496 @@ async function main() {
   };
   registerTool(deviceRelationshipsTool);
 
+  // Add area-based device management tools
+  const getDevicesByAreaTool = {
+    name: 'get_devices_by_area',
+    description: 'Find all devices in a specific area by area_id',
+    parameters: z.object({
+      area_id: z.string().describe('The area ID to search for devices in'),
+      include_details: z.boolean().default(false).optional()
+        .describe('Include full device details and attributes'),
+      domain_filter: z.string().optional()
+        .describe('Filter by specific domain (e.g., "light", "switch", "sensor")'),
+      state_filter: z.string().optional()
+        .describe('Filter by current state (e.g., "on", "off", "unavailable")'),
+    }),
+    execute: async (params: {
+      area_id: string;
+      include_details?: boolean;
+      domain_filter?: string;
+      state_filter?: string;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        // Get entities and devices for the area using WebSocket
+        const [entities, devices, states] = await Promise.all([
+          wsClient.callWS({ type: 'config/entity_registry/list' }),
+          wsClient.callWS({ type: 'config/device_registry/list' }),
+          wsClient.callWS({ type: 'get_states' })
+        ]);
+
+        if (!Array.isArray(entities) || !Array.isArray(devices) || !Array.isArray(states)) {
+          throw new Error('Invalid response from Home Assistant');
+        }
+
+        // Find entities in this area
+        const areaEntities = entities.filter((entity: any) => entity.area_id === params.area_id);
+        
+        // Find devices in this area
+        const areaDevices = devices.filter((device: any) => device.area_id === params.area_id);
+        
+        // Get entity IDs from devices in this area
+        const deviceEntityIds = new Set();
+        areaDevices.forEach((device: any) => {
+          // Find entities that belong to this device
+          const deviceEntities = entities.filter((entity: any) => entity.device_id === device.id);
+          deviceEntities.forEach((entity: any) => deviceEntityIds.add(entity.entity_id));
+        });
+
+        // Combine direct area entities and device entities
+        const allAreaEntityIds = new Set([
+          ...areaEntities.map((entity: any) => entity.entity_id),
+          ...deviceEntityIds
+        ]);
+
+        // Get current states for these entities
+        let entityStates = states.filter((state: any) => allAreaEntityIds.has(state.entity_id));
+
+        // Apply domain filter if specified
+        if (params.domain_filter) {
+          entityStates = entityStates.filter((state: any) => 
+            state.entity_id.split('.')[0] === params.domain_filter
+          );
+        }
+
+        // Apply state filter if specified
+        if (params.state_filter) {
+          entityStates = entityStates.filter((state: any) => 
+            state.state === params.state_filter
+          );
+        }
+
+        // Group by domain for better organization
+        const devicesByDomain: Record<string, any[]> = {};
+        entityStates.forEach((state: any) => {
+          const domain = state.entity_id.split('.')[0];
+          if (!devicesByDomain[domain]) {
+            devicesByDomain[domain] = [];
+          }
+          
+          const deviceInfo = {
+            entity_id: state.entity_id,
+            state: state.state,
+            friendly_name: state.attributes?.friendly_name || state.entity_id,
+            device_class: state.attributes?.device_class,
+            last_changed: state.last_changed,
+            last_updated: state.last_updated,
+          };
+
+          if (params.include_details) {
+            (deviceInfo as any).attributes = state.attributes;
+          }
+
+          devicesByDomain[domain].push(deviceInfo);
+        });
+
+        return {
+          success: true,
+          area_id: params.area_id,
+          total_devices: entityStates.length,
+          total_entities_in_area: areaEntities.length,
+          total_devices_in_area: areaDevices.length,
+          domains: Object.keys(devicesByDomain),
+          devices_by_domain: devicesByDomain,
+          source: 'websocket_registries',
+          filters_applied: {
+            domain: params.domain_filter,
+            state: params.state_filter,
+            include_details: params.include_details ?? false,
+          },
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+          area_id: params.area_id,
+        };
+      }
+    }
+  };
+  registerTool(getDevicesByAreaTool);
+
+  const getUnassignedDevicesTool = {
+    name: 'get_unassigned_devices',
+    description: 'Find all devices that do not have an area_id assigned',
+    parameters: z.object({
+      domain_filter: z.string().optional()
+        .describe('Filter by specific domain (e.g., "light", "switch", "sensor")'),
+      state_filter: z.string().optional()
+        .describe('Filter by current state (e.g., "on", "off", "unavailable")'),
+      include_details: z.boolean().default(false).optional()
+        .describe('Include full device details and attributes'),
+      limit: z.number().min(1).max(500).default(100).optional()
+        .describe('Maximum number of results to return'),
+    }),
+    execute: async (params: {
+      domain_filter?: string;
+      state_filter?: string;
+      include_details?: boolean;
+      limit?: number;
+    }) => {
+      try {
+        // Get all entity states
+        const statesResponse = await fetch(`${HASS_HOST}/api/states`, {
+          headers: {
+            Authorization: `Bearer ${HASS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!statesResponse.ok) {
+          throw new Error(`Failed to fetch states: ${statesResponse.statusText}`);
+        }
+
+        const states = await statesResponse.json() as HassState[];
+
+        // Filter devices without area_id
+        let unassignedDevices = states.filter(state => 
+          !state.attributes?.area_id
+        );
+
+        // Apply domain filter if specified
+        if (params.domain_filter) {
+          unassignedDevices = unassignedDevices.filter(device => 
+            device.entity_id.split('.')[0] === params.domain_filter
+          );
+        }
+
+        // Apply state filter if specified
+        if (params.state_filter) {
+          unassignedDevices = unassignedDevices.filter(device => 
+            device.state === params.state_filter
+          );
+        }
+
+        // Apply limit
+        const limit = params.limit || 100;
+        const limitedDevices = unassignedDevices.slice(0, limit);
+
+        // Group by domain for better organization
+        const devicesByDomain: Record<string, any[]> = {};
+        limitedDevices.forEach(device => {
+          const domain = device.entity_id.split('.')[0];
+          if (!devicesByDomain[domain]) {
+            devicesByDomain[domain] = [];
+          }
+          
+          const deviceInfo = {
+            entity_id: device.entity_id,
+            state: device.state,
+            friendly_name: device.attributes?.friendly_name || device.entity_id,
+            device_class: device.attributes?.device_class,
+            device_id: device.attributes?.device_id,
+            last_changed: (device as any).last_changed,
+            last_updated: (device as any).last_updated,
+          };
+
+          if (params.include_details) {
+            (deviceInfo as any).attributes = device.attributes;
+          }
+
+          devicesByDomain[domain].push(deviceInfo);
+        });
+
+        return {
+          success: true,
+          total_unassigned: unassignedDevices.length,
+          returned: limitedDevices.length,
+          domains: Object.keys(devicesByDomain),
+          devices_by_domain: devicesByDomain,
+          filters_applied: {
+            domain: params.domain_filter,
+            state: params.state_filter,
+            limit: limit,
+            include_details: params.include_details ?? false,
+          },
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+        };
+      }
+    }
+  };
+  registerTool(getUnassignedDevicesTool);
+
+  const assignDeviceAreaTool = {
+    name: 'assign_device_area',
+    description: 'Assign an area_id to devices that do not have one. This updates the device registry.',
+    parameters: z.object({
+      entity_id: z.string().describe('The entity ID to assign an area to'),
+      area_id: z.string().describe('The area ID to assign to the device'),
+      verify_area_exists: z.boolean().default(true).optional()
+        .describe('Verify that the area exists before assignment'),
+    }),
+    execute: async (params: {
+      entity_id: string;
+      area_id: string;
+      verify_area_exists?: boolean;
+    }) => {
+      try {
+        // First, verify the entity exists
+        const stateResponse = await fetch(`${HASS_HOST}/api/states/${params.entity_id}`, {
+          headers: {
+            Authorization: `Bearer ${HASS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!stateResponse.ok) {
+          if (stateResponse.status === 404) {
+            return {
+              success: false,
+              message: `Entity '${params.entity_id}' not found`,
+              entity_id: params.entity_id,
+            };
+          }
+          throw new Error(`Failed to fetch entity state: ${stateResponse.statusText}`);
+        }
+
+        const entityState = await stateResponse.json() as HassState;
+
+        // Check if device already has an area assigned
+        if (entityState.attributes?.area_id) {
+          return {
+            success: false,
+            message: `Entity '${params.entity_id}' already has area '${entityState.attributes.area_id}' assigned`,
+            entity_id: params.entity_id,
+            current_area_id: entityState.attributes.area_id,
+          };
+        }
+
+        // Verify area exists if requested
+        if (params.verify_area_exists) {
+          const areasResponse = await fetch(`${HASS_HOST}/api/config/area_registry`, {
+            headers: {
+              Authorization: `Bearer ${HASS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+          });
+
+          if (areasResponse.ok) {
+            const areas = await areasResponse.json() as Array<{area_id: string; [key: string]: any}>;
+            const areaExists = areas.some((area: any) => area.area_id === params.area_id);
+            if (!areaExists) {
+              return {
+                success: false,
+                message: `Area '${params.area_id}' does not exist`,
+                entity_id: params.entity_id,
+                area_id: params.area_id,
+              };
+            }
+          }
+        }
+
+        // Get device_id from entity registry
+        const entityRegistryResponse = await fetch(`${HASS_HOST}/api/config/entity_registry`, {
+          headers: {
+            Authorization: `Bearer ${HASS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!entityRegistryResponse.ok) {
+          throw new Error(`Failed to fetch entity registry: ${entityRegistryResponse.statusText}`);
+        }
+
+        const entityRegistry = await entityRegistryResponse.json() as Array<{entity_id: string; device_id: string; [key: string]: any}>;
+        const entityRegistryEntry = entityRegistry.find((entry: any) => entry.entity_id === params.entity_id);
+
+        if (!entityRegistryEntry) {
+          return {
+            success: false,
+            message: `Entity '${params.entity_id}' not found in entity registry`,
+            entity_id: params.entity_id,
+          };
+        }
+
+        const deviceId = entityRegistryEntry.device_id;
+        if (!deviceId) {
+          return {
+            success: false,
+            message: `Entity '${params.entity_id}' is not associated with a physical device`,
+            entity_id: params.entity_id,
+          };
+        }
+
+        // Update device area in device registry
+        const updateResponse = await fetch(`${HASS_HOST}/api/config/device_registry/${deviceId}`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${HASS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            area_id: params.area_id,
+          }),
+        });
+
+        if (!updateResponse.ok) {
+          throw new Error(`Failed to update device area: ${updateResponse.statusText}`);
+        }
+
+        const updatedDevice = await updateResponse.json();
+
+        return {
+          success: true,
+          message: `Successfully assigned area '${params.area_id}' to device containing entity '${params.entity_id}'`,
+          entity_id: params.entity_id,
+          device_id: deviceId,
+          area_id: params.area_id,
+          updated_device: updatedDevice,
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+          entity_id: params.entity_id,
+          area_id: params.area_id,
+        };
+      }
+    }
+  };
+  registerTool(assignDeviceAreaTool);
+
+  const getAvailableAreasTool = {
+    name: 'get_available_areas',
+    description: 'Get all available areas (rooms/zones) defined in Home Assistant',
+    parameters: z.object({
+      include_device_counts: z.boolean().default(false).optional()
+        .describe('Include count of devices in each area'),
+      sort_by: z.enum(['name', 'area_id']).default('name').optional()
+        .describe('Sort areas by name or area_id'),
+      include_empty: z.boolean().default(true).optional()
+        .describe('Include areas with no devices assigned'),
+    }),
+    execute: async (params: {
+      include_device_counts?: boolean;
+      sort_by?: 'name' | 'area_id';
+      include_empty?: boolean;
+    }) => {
+      try {
+        // Use WebSocket API to get areas (REST API not available for area registry)
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        const areas = await wsClient.callWS({
+          type: 'config/area_registry/list'
+        });
+
+        if (!Array.isArray(areas)) {
+          throw new Error('Invalid response from area registry');
+        }
+
+        let processedAreas = areas.map((area: any) => ({
+          area_id: area.area_id,
+          name: area.name,
+          aliases: area.aliases || [],
+          picture: area.picture || null,
+          icon: area.icon || null,
+          floor_id: area.floor_id || null,
+          device_count: 0, // Will be populated if requested
+        }));
+
+        // Get device counts if requested
+        if (params.include_device_counts) {
+          try {
+            // Get entity registry to find entities with area assignments
+            const entities = await wsClient.callWS({
+              type: 'config/entity_registry/list'
+            });
+
+            // Get device registry to find devices with area assignments  
+            const devices = await wsClient.callWS({
+              type: 'config/device_registry/list'
+            });
+
+            // Count entities per area
+            const entityCounts: Record<string, number> = {};
+            if (Array.isArray(entities)) {
+              entities.forEach((entity: any) => {
+                if (entity.area_id) {
+                  entityCounts[entity.area_id] = (entityCounts[entity.area_id] || 0) + 1;
+                }
+              });
+            }
+
+            // Count devices per area
+            const deviceCounts: Record<string, number> = {};
+            if (Array.isArray(devices)) {
+              devices.forEach((device: any) => {
+                if (device.area_id) {
+                  deviceCounts[device.area_id] = (deviceCounts[device.area_id] || 0) + 1;
+                }
+              });
+            }
+
+            // Update device counts (combine entities and devices)
+            processedAreas = processedAreas.map(area => ({
+              ...area,
+              device_count: (entityCounts[area.area_id] || 0) + (deviceCounts[area.area_id] || 0),
+            }));
+
+            // Filter out empty areas if requested
+            if (!params.include_empty) {
+              processedAreas = processedAreas.filter(area => area.device_count > 0);
+            }
+          } catch (error) {
+            // If device counting fails, continue without counts
+            console.warn('Failed to count devices per area:', error);
+          }
+        }
+
+        // Sort areas
+        const sortBy = params.sort_by || 'name';
+        processedAreas.sort((a, b) => {
+          if (sortBy === 'name') {
+            return a.name.localeCompare(b.name);
+          } else {
+            return a.area_id.localeCompare(b.area_id);
+          }
+        });
+
+        return {
+          success: true,
+          total_areas: processedAreas.length,
+          areas: processedAreas,
+          source: 'websocket_area_registry',
+          options: {
+            include_device_counts: params.include_device_counts ?? false,
+            sort_by: sortBy,
+            include_empty: params.include_empty ?? true,
+          },
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+        };
+      }
+    }
+  };
+  registerTool(getAvailableAreasTool);
+
   // Add the Home Assistant control tool
   const controlTool = {
     name: 'control',

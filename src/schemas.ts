@@ -253,3 +253,98 @@ export const ListCamerasResponseSchema = z.object({
 export const ListUpdatesResponseSchema = z.object({
     updates: z.array(UpdateSchema),
 });
+
+// Area management schemas
+export const DeviceByAreaSchema = z.object({
+    entity_id: z.string(),
+    state: z.string(),
+    friendly_name: z.string(),
+    device_class: z.string().optional(),
+    last_changed: z.string().optional(),
+    last_updated: z.string().optional(),
+    attributes: z.record(z.any()).optional(),
+});
+
+export const GetDevicesByAreaRequestSchema = z.object({
+    area_id: z.string(),
+    include_details: z.boolean().default(false).optional(),
+    domain_filter: z.string().optional(),
+    state_filter: z.string().optional(),
+});
+
+export const GetDevicesByAreaResponseSchema = z.object({
+    success: z.boolean(),
+    area_id: z.string(),
+    total_devices: z.number(),
+    domains: z.array(z.string()),
+    devices_by_domain: z.record(z.array(DeviceByAreaSchema)),
+    filters_applied: z.object({
+        domain: z.string().optional(),
+        state: z.string().optional(),
+        include_details: z.boolean(),
+    }),
+});
+
+export const GetUnassignedDevicesRequestSchema = z.object({
+    domain_filter: z.string().optional(),
+    state_filter: z.string().optional(),
+    include_details: z.boolean().default(false).optional(),
+    limit: z.number().min(1).max(500).default(100).optional(),
+});
+
+export const GetUnassignedDevicesResponseSchema = z.object({
+    success: z.boolean(),
+    total_unassigned: z.number(),
+    returned: z.number(),
+    domains: z.array(z.string()),
+    devices_by_domain: z.record(z.array(DeviceByAreaSchema)),
+    filters_applied: z.object({
+        domain: z.string().optional(),
+        state: z.string().optional(),
+        limit: z.number(),
+        include_details: z.boolean(),
+    }),
+});
+
+export const AssignDeviceAreaRequestSchema = z.object({
+    entity_id: z.string(),
+    area_id: z.string(),
+    verify_area_exists: z.boolean().default(true).optional(),
+});
+
+export const AssignDeviceAreaResponseSchema = z.object({
+    success: z.boolean(),
+    message: z.string(),
+    entity_id: z.string(),
+    device_id: z.string().optional(),
+    area_id: z.string().optional(),
+    current_area_id: z.string().optional(),
+    updated_device: z.record(z.any()).optional(),
+});
+
+// Available areas schemas
+export const AreaInfoSchema = z.object({
+    area_id: z.string(),
+    name: z.string(),
+    aliases: z.array(z.string()),
+    picture: z.string().nullable(),
+    icon: z.string().nullable(),
+    device_count: z.number(),
+});
+
+export const GetAvailableAreasRequestSchema = z.object({
+    include_device_counts: z.boolean().default(false).optional(),
+    sort_by: z.enum(['name', 'area_id']).default('name').optional(),
+    include_empty: z.boolean().default(true).optional(),
+});
+
+export const GetAvailableAreasResponseSchema = z.object({
+    success: z.boolean(),
+    total_areas: z.number(),
+    areas: z.array(AreaInfoSchema),
+    options: z.object({
+        include_device_counts: z.boolean(),
+        sort_by: z.enum(['name', 'area_id']),
+        include_empty: z.boolean(),
+    }),
+});

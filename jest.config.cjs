@@ -29,7 +29,8 @@ module.exports = {
         '**/__tests__/schemas/devices.test.ts',
         '**/__tests__/context/index.test.ts',
         '**/__tests__/hass/index.test.ts',
-        '**/__tests__/utils/logger.test.ts'
+        '**/__tests__/utils/logger.test.ts',
+        '**/__tests__/area-devices.test.ts'
     ],
     globals: {
         'ts-jest': {
