@@ -1088,18 +1088,19 @@ async function main() {
   };
   registerTool(listDevicesTool);
 
-  // Add the device search tool
+  // Add the enhanced device search tool with area support
   const searchDevicesTool = {
     name: 'search_devices',
-    description: 'Search for Home Assistant devices by name, domain, entity ID pattern, state, or attributes',
+    description: 'Search for Home Assistant devices by name, domain, entity ID pattern, state, area, or attributes',
     parameters: z.object({
       query: z.string().optional().describe('Search query - matches against entity ID, friendly name, or domain'),
       domain: z.string().optional().describe('Filter by specific domain (e.g., "light", "switch", "sensor")'),
       state: z.string().optional().describe('Filter by current state (e.g., "on", "off", "unavailable")'),
-      area: z.string().optional().describe('Filter by area name'),
+      area: z.string().optional().describe('Filter by area name or area_id (e.g., "Living Room", "living_room")'),
       device_class: z.string().optional().describe('Filter by device class (e.g., "motion", "temperature", "humidity")'),
-      limit: z.number().min(1).max(100).default(20).optional().describe('Maximum number of results to return'),
+      limit: z.number().min(1).max(500).default(50).optional().describe('Maximum number of results to return'),
       include_attributes: z.boolean().default(false).optional().describe('Include full attributes in response'),
+      include_area_info: z.boolean().default(true).optional().describe('Include area information for each device'),
     }),
     execute: async (params: {
       query?: string;
@@ -1109,92 +1110,154 @@ async function main() {
       device_class?: string;
       limit?: number;
       include_attributes?: boolean;
+      include_area_info?: boolean;
     }) => {
       try {
-        const response = await fetch(`${HASS_HOST}/api/states`, {
-          headers: {
-            Authorization: `Bearer ${HASS_TOKEN}`,
-            'Content-Type': 'application/json',
-          },
-        });
-
-        if (!response.ok) {
-          throw new Error(`Failed to fetch devices: ${response.statusText}`);
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
         }
 
-        const states = await response.json() as HassState[];
+        // Get all necessary data via WebSocket
+        const [states, entities, devices, areas] = await Promise.all([
+          wsClient.callWS({ type: 'get_states' }),
+          wsClient.callWS({ type: 'config/entity_registry/list' }),
+          wsClient.callWS({ type: 'config/device_registry/list' }),
+          wsClient.callWS({ type: 'config/area_registry/list' })
+        ]);
+
+        if (!Array.isArray(states) || !Array.isArray(entities) || !Array.isArray(devices) || !Array.isArray(areas)) {
+          throw new Error('Invalid response from Home Assistant WebSocket API');
+        }
+
+        // Create area lookup maps
+        const areaMap = new Map(areas.map((area: any) => [area.area_id, area]));
+        const entityAreaMap = new Map();
+        
+        // Map entities to their areas (direct and via devices)
+        entities.forEach((entity: any) => {
+          if (entity.area_id) {
+            entityAreaMap.set(entity.entity_id, entity.area_id);
+          } else if (entity.device_id) {
+            // Find device and get its area
+            const device = devices.find((d: any) => d.id === entity.device_id);
+            if (device?.area_id) {
+              entityAreaMap.set(entity.entity_id, device.area_id);
+            }
+          }
+        });
+
         let filteredDevices = states;
 
         // Apply domain filter
         if (params.domain) {
-          filteredDevices = filteredDevices.filter(device => 
+          filteredDevices = filteredDevices.filter((device: any) => 
             device.entity_id.startsWith(`${params.domain}.`)
           );
         }
 
         // Apply state filter
         if (params.state) {
-          filteredDevices = filteredDevices.filter(device => 
+          filteredDevices = filteredDevices.filter((device: any) => 
             device.state.toLowerCase() === params.state!.toLowerCase()
           );
         }
 
         // Apply device class filter
         if (params.device_class) {
-          filteredDevices = filteredDevices.filter(device => 
+          filteredDevices = filteredDevices.filter((device: any) => 
             device.attributes?.device_class === params.device_class
           );
         }
 
-        // Apply area filter (check area_id in attributes)
+        // Apply area filter (enhanced with WebSocket data)
         if (params.area) {
-          filteredDevices = filteredDevices.filter(device => {
-            const areaName = device.attributes?.area_id;
-            const friendlyName = device.attributes?.friendly_name;
-            return areaName?.toLowerCase().includes(params.area!.toLowerCase()) ||
-                   friendlyName?.toLowerCase().includes(params.area!.toLowerCase());
+          const areaQuery = params.area.toLowerCase();
+          filteredDevices = filteredDevices.filter((device: any) => {
+            const entityAreaId = entityAreaMap.get(device.entity_id);
+            if (!entityAreaId) return false;
+            
+            const area = areaMap.get(entityAreaId);
+            if (!area) return false;
+            
+            // Match area_id, name, or aliases
+            return area.area_id.toLowerCase().includes(areaQuery) ||
+                   area.name.toLowerCase().includes(areaQuery) ||
+                   (area.aliases && area.aliases.some((alias: string) => 
+                     alias.toLowerCase().includes(areaQuery)
+                   ));
           });
         }
 
         // Apply text search query
         if (params.query) {
           const queryLower = params.query.toLowerCase();
-          filteredDevices = filteredDevices.filter(device => {
+          filteredDevices = filteredDevices.filter((device: any) => {
             const entityId = device.entity_id.toLowerCase();
             const friendlyName = device.attributes?.friendly_name?.toLowerCase() || '';
             const domain = device.entity_id.split('.')[0];
             
+            // Also search in area information
+            const entityAreaId = entityAreaMap.get(device.entity_id);
+            const area = entityAreaId ? areaMap.get(entityAreaId) : null;
+            const areaName = area?.name?.toLowerCase() || '';
+            
             return entityId.includes(queryLower) ||
                    friendlyName.includes(queryLower) ||
-                   domain.includes(queryLower);
+                   domain.includes(queryLower) ||
+                   areaName.includes(queryLower);
           });
         }
 
         // Apply limit
-        const limit = params.limit || 20;
+        const limit = params.limit || 50;
         const limitedDevices = filteredDevices.slice(0, limit);
 
         // Format response
-        const results = limitedDevices.map(device => {
-          const baseInfo = {
+        const results = limitedDevices.map((device: any) => {
+          const entityAreaId = entityAreaMap.get(device.entity_id);
+          const area = entityAreaId ? areaMap.get(entityAreaId) : null;
+          
+          const baseInfo: any = {
             entity_id: device.entity_id,
             state: device.state,
             friendly_name: device.attributes?.friendly_name || device.entity_id,
             domain: device.entity_id.split('.')[0],
             device_class: device.attributes?.device_class,
-            area_id: device.attributes?.area_id,
-            last_changed: (device as any).last_changed,
-            last_updated: (device as any).last_updated,
+            last_changed: device.last_changed,
+            last_updated: device.last_updated,
           };
 
-          if (params.include_attributes) {
-            return {
-              ...baseInfo,
-              attributes: device.attributes,
+          // Add area information if requested
+          if (params.include_area_info !== false && area) {
+            baseInfo.area = {
+              area_id: area.area_id,
+              name: area.name,
+              floor_id: area.floor_id,
+              icon: area.icon,
             };
           }
 
+          if (params.include_attributes) {
+            baseInfo.attributes = device.attributes;
+          }
+
           return baseInfo;
+        });
+
+        // Group results by area for better organization
+        const resultsByArea: Record<string, any[]> = {};
+        const noAreaResults: any[] = [];
+        
+        results.forEach((result: any) => {
+          if (result.area) {
+            const areaName = result.area.name;
+            if (!resultsByArea[areaName]) {
+              resultsByArea[areaName] = [];
+            }
+            resultsByArea[areaName].push(result);
+          } else {
+            noAreaResults.push(result);
+          }
         });
 
         return {
@@ -1202,6 +1265,8 @@ async function main() {
           total_found: filteredDevices.length,
           returned: results.length,
           devices: results,
+          devices_by_area: Object.keys(resultsByArea).length > 0 ? resultsByArea : undefined,
+          devices_without_area: noAreaResults.length > 0 ? noAreaResults : undefined,
           filters_applied: {
             query: params.query,
             domain: params.domain,
@@ -1209,7 +1274,9 @@ async function main() {
             area: params.area,
             device_class: params.device_class,
             limit: limit,
+            include_area_info: params.include_area_info ?? true,
           },
+          search_method: 'websocket_with_area_registry',
         };
       } catch (error) {
         return {
@@ -1220,6 +1287,267 @@ async function main() {
     }
   };
   registerTool(searchDevicesTool);
+
+  // Add comprehensive area-based device discovery tool
+  const searchDevicesByAreaTool = {
+    name: 'search_devices_by_area',
+    description: 'Advanced search for devices across multiple areas with comprehensive filtering and organization',
+    parameters: z.object({
+      areas: z.array(z.string()).optional().describe('Array of area names or IDs to search in (if empty, searches all areas)'),
+      query: z.string().optional().describe('Text search query for device names, entity IDs, or attributes'),
+      domains: z.array(z.string()).optional().describe('Filter by device domains (e.g., ["light", "switch", "sensor"])'),
+      states: z.array(z.string()).optional().describe('Filter by device states (e.g., ["on", "off"])'),
+      device_classes: z.array(z.string()).optional().describe('Filter by device classes (e.g., ["motion", "temperature"])'),
+      include_unavailable: z.boolean().default(false).optional().describe('Include devices with unavailable state'),
+      group_by: z.enum(['area', 'domain', 'floor', 'none']).default('area').optional().describe('How to group the results'),
+      sort_by: z.enum(['name', 'area', 'domain', 'state', 'last_changed']).default('area').optional().describe('Sort results by field'),
+      limit_per_area: z.number().min(1).max(100).default(50).optional().describe('Maximum devices per area'),
+      include_area_summary: z.boolean().default(true).optional().describe('Include area summary statistics'),
+    }),
+    execute: async (params: {
+      areas?: string[];
+      query?: string;
+      domains?: string[];
+      states?: string[];
+      device_classes?: string[];
+      include_unavailable?: boolean;
+      group_by?: 'area' | 'domain' | 'floor' | 'none';
+      sort_by?: 'name' | 'area' | 'domain' | 'state' | 'last_changed';
+      limit_per_area?: number;
+      include_area_summary?: boolean;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        // Get all necessary data
+        const [states, entities, devices, areas] = await Promise.all([
+          wsClient.callWS({ type: 'get_states' }),
+          wsClient.callWS({ type: 'config/entity_registry/list' }),
+          wsClient.callWS({ type: 'config/device_registry/list' }),
+          wsClient.callWS({ type: 'config/area_registry/list' })
+        ]);
+
+        if (!Array.isArray(states) || !Array.isArray(entities) || !Array.isArray(devices) || !Array.isArray(areas)) {
+          throw new Error('Invalid response from Home Assistant WebSocket API');
+        }
+
+        // Create lookup maps
+        const areaMap = new Map(areas.map((area: any) => [area.area_id, area]));
+        const entityAreaMap = new Map();
+        const deviceMap = new Map(devices.map((device: any) => [device.id, device]));
+        
+        // Map entities to their areas
+        entities.forEach((entity: any) => {
+          if (entity.area_id) {
+            entityAreaMap.set(entity.entity_id, entity.area_id);
+          } else if (entity.device_id) {
+            const device = deviceMap.get(entity.device_id);
+            if (device?.area_id) {
+              entityAreaMap.set(entity.entity_id, device.area_id);
+            }
+          }
+        });
+
+        // Filter areas if specified
+        let targetAreas = areas;
+        if (params.areas && params.areas.length > 0) {
+          targetAreas = areas.filter((area: any) => {
+            return params.areas!.some(searchArea => 
+              area.area_id.toLowerCase().includes(searchArea.toLowerCase()) ||
+              area.name.toLowerCase().includes(searchArea.toLowerCase()) ||
+              (area.aliases && area.aliases.some((alias: string) => 
+                alias.toLowerCase().includes(searchArea.toLowerCase())
+              ))
+            );
+          });
+        }
+
+        let filteredDevices = states;
+
+        // Filter by availability
+        if (!params.include_unavailable) {
+          filteredDevices = filteredDevices.filter((device: any) => 
+            device.state !== 'unavailable' && device.state !== 'unknown'
+          );
+        }
+
+        // Filter by domains
+        if (params.domains && params.domains.length > 0) {
+          filteredDevices = filteredDevices.filter((device: any) => 
+            params.domains!.includes(device.entity_id.split('.')[0])
+          );
+        }
+
+        // Filter by states
+        if (params.states && params.states.length > 0) {
+          filteredDevices = filteredDevices.filter((device: any) => 
+            params.states!.includes(device.state)
+          );
+        }
+
+        // Filter by device classes
+        if (params.device_classes && params.device_classes.length > 0) {
+          filteredDevices = filteredDevices.filter((device: any) => 
+            device.attributes?.device_class && 
+            params.device_classes!.includes(device.attributes.device_class)
+          );
+        }
+
+        // Filter by text query
+        if (params.query) {
+          const queryLower = params.query.toLowerCase();
+          filteredDevices = filteredDevices.filter((device: any) => {
+            const entityId = device.entity_id.toLowerCase();
+            const friendlyName = device.attributes?.friendly_name?.toLowerCase() || '';
+            const domain = device.entity_id.split('.')[0];
+            
+            return entityId.includes(queryLower) ||
+                   friendlyName.includes(queryLower) ||
+                   domain.includes(queryLower);
+          });
+        }
+
+        // Filter by target areas and organize results
+        const devicesByArea: Record<string, any[]> = {};
+        const devicesWithoutArea: any[] = [];
+        const areaStats: Record<string, any> = {};
+
+        targetAreas.forEach((area: any) => {
+          devicesByArea[area.area_id] = [];
+          areaStats[area.area_id] = {
+            area_info: area,
+            total_devices: 0,
+            domains: new Set(),
+            states: new Set(),
+          };
+        });
+
+        filteredDevices.forEach((device: any) => {
+          const entityAreaId = entityAreaMap.get(device.entity_id);
+          const area = entityAreaId ? areaMap.get(entityAreaId) : null;
+          
+          const deviceInfo = {
+            entity_id: device.entity_id,
+            state: device.state,
+            friendly_name: device.attributes?.friendly_name || device.entity_id,
+            domain: device.entity_id.split('.')[0],
+            device_class: device.attributes?.device_class,
+            last_changed: device.last_changed,
+            last_updated: device.last_updated,
+            area: area ? {
+              area_id: area.area_id,
+              name: area.name,
+              floor_id: area.floor_id,
+              icon: area.icon,
+            } : null,
+          };
+
+          if (area && devicesByArea[area.area_id] !== undefined) {
+            // Apply per-area limit
+            if (devicesByArea[area.area_id].length < (params.limit_per_area || 50)) {
+              devicesByArea[area.area_id].push(deviceInfo);
+            }
+            
+            // Update stats
+            areaStats[area.area_id].total_devices++;
+            areaStats[area.area_id].domains.add(deviceInfo.domain);
+            areaStats[area.area_id].states.add(deviceInfo.state);
+          } else if (!area) {
+            devicesWithoutArea.push(deviceInfo);
+          }
+        });
+
+        // Convert sets to arrays for JSON serialization
+        Object.values(areaStats).forEach((stats: any) => {
+          stats.domains = Array.from(stats.domains);
+          stats.states = Array.from(stats.states);
+        });
+
+        // Sort devices within each area
+        const sortField = params.sort_by || 'area';
+        Object.values(devicesByArea).forEach((devices: any[]) => {
+          devices.sort((a, b) => {
+            switch (sortField) {
+              case 'name':
+                return a.friendly_name.localeCompare(b.friendly_name);
+              case 'domain':
+                return a.domain.localeCompare(b.domain);
+              case 'state':
+                return a.state.localeCompare(b.state);
+              case 'last_changed':
+                return new Date(b.last_changed).getTime() - new Date(a.last_changed).getTime();
+              default:
+                return a.friendly_name.localeCompare(b.friendly_name);
+            }
+          });
+        });
+
+        // Organize results based on grouping preference
+        let organizedResults: any;
+        const allDevices = Object.values(devicesByArea).flat().concat(devicesWithoutArea);
+        
+        switch (params.group_by) {
+          case 'domain':
+            const byDomain: Record<string, any[]> = {};
+            allDevices.forEach(device => {
+              if (!byDomain[device.domain]) byDomain[device.domain] = [];
+              byDomain[device.domain].push(device);
+            });
+            organizedResults = { devices_by_domain: byDomain };
+            break;
+            
+          case 'floor':
+            const byFloor: Record<string, any[]> = {};
+            allDevices.forEach(device => {
+              const floorId = device.area?.floor_id || 'no_floor';
+              if (!byFloor[floorId]) byFloor[floorId] = [];
+              byFloor[floorId].push(device);
+            });
+            organizedResults = { devices_by_floor: byFloor };
+            break;
+            
+          case 'none':
+            organizedResults = { devices: allDevices };
+            break;
+            
+          default: // 'area'
+            organizedResults = { 
+              devices_by_area: devicesByArea,
+              devices_without_area: devicesWithoutArea.length > 0 ? devicesWithoutArea : undefined
+            };
+        }
+
+        return {
+          success: true,
+          total_areas_searched: targetAreas.length,
+          total_devices_found: allDevices.length,
+          ...organizedResults,
+          area_statistics: params.include_area_summary ? areaStats : undefined,
+          filters_applied: {
+            areas: params.areas,
+            query: params.query,
+            domains: params.domains,
+            states: params.states,
+            device_classes: params.device_classes,
+            include_unavailable: params.include_unavailable ?? false,
+            group_by: params.group_by || 'area',
+            sort_by: params.sort_by || 'area',
+            limit_per_area: params.limit_per_area || 50,
+          },
+          search_method: 'comprehensive_area_websocket',
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+      }
+    }
+  };
+  registerTool(searchDevicesByAreaTool);
 
   // Add the device details tool
   const deviceDetailsTool = {
