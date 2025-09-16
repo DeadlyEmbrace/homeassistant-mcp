@@ -2538,6 +2538,9 @@ async function main() {
                 const error = await templateResponse.text();
                 throw new Error(`Invalid template: ${error}`);
               }
+              
+              const result = await templateResponse.text();
+              console.log(`Template validation successful. Rendered value: ${result}`);
             } catch (error) {
               throw new Error(`Template validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             }
@@ -2570,46 +2573,18 @@ async function main() {
               sensorConfig.attributes = params.attributes;
             }
 
-            // Try to create template sensor via configuration entry
-            try {
-              const configEntry = {
-                domain: 'template',
-                title: `Template Sensor: ${params.sensor_name}`,
-                data: {},
-                options: {
-                  sensor: {
-                    [params.sensor_name]: sensorConfig
-                  }
-                }
-              };
-
-              // This approach may not work for all Home Assistant installations
-              // Template sensors are typically configured in configuration.yaml
-              const response = await wsClient.callWS({
-                type: 'config_entries/create',
-                domain: 'template',
-                data: configEntry.data,
-                options: configEntry.options,
-                title: configEntry.title,
-              });
-
-              if (response) {
-                return {
-                  success: true,
-                  message: `Template sensor ${params.sensor_name} created successfully`,
-                  sensor_name: params.sensor_name,
-                  entity_id: `sensor.${params.sensor_name}`,
-                  configuration: sensorConfig,
-                  creation_method: 'config_entry',
-                  note: 'Sensor created via configuration entry - may require restart to appear'
-                };
-              }
-            } catch (configError) {
-              // Config entry creation failed, provide YAML configuration instead
-            }
-
-            // Generate YAML configuration for manual addition
+            // REALITY CHECK: Template sensors cannot be created via API
+            // Home Assistant's template integration only loads from YAML configuration
+            
+            // Generate comprehensive YAML configuration
             const yamlConfig = generateTemplateSensorYAML(params.sensor_name, sensorConfig);
+            
+            // Generate alternative approaches that DO work via API
+            const alternatives = {
+              input_text_helper: generateInputTextHelperConfig(params.sensor_name, params.value_template),
+              automation_update: generateAutomationConfig(params.sensor_name, params.value_template),
+              rest_sensor: generateRestSensorConfig(params.sensor_name, params.value_template, sensorConfig)
+            };
 
             return {
               success: true,
@@ -2617,9 +2592,42 @@ async function main() {
               sensor_name: params.sensor_name,
               entity_id: `sensor.${params.sensor_name}`,
               configuration: sensorConfig,
+              
+              // Primary approach: YAML configuration
               yaml_configuration: yamlConfig,
-              creation_method: 'yaml_generation',
-              instructions: 'Add the YAML configuration to your configuration.yaml file under the template: section and restart Home Assistant'
+              creation_method: 'yaml_configuration',
+              
+              // Alternative approaches that work via API
+              api_alternatives: {
+                input_text_helper: {
+                  description: 'Create input_text helper + automation (API creatable)',
+                  helper_config: alternatives.input_text_helper,
+                  automation_config: alternatives.automation_update,
+                  entity_id: `input_text.template_${params.sensor_name}`,
+                  note: 'This creates a helper that updates via automation - not a true template sensor'
+                },
+                rest_sensor: {
+                  description: 'REST sensor that calls template API (auto-updating)',
+                  yaml_config: alternatives.rest_sensor,
+                  entity_id: `sensor.${params.sensor_name}_rest`,
+                  note: 'This creates a REST sensor that evaluates templates automatically'
+                }
+              },
+              
+              // Instructions
+              instructions: {
+                primary: 'Add the yaml_configuration to your configuration.yaml under template: section and restart Home Assistant',
+                alternative_1: 'Use the input_text_helper approach to create via API (helper + automation)',
+                alternative_2: 'Use the rest_sensor YAML for auto-updating template evaluation',
+                reality_check: 'True template sensors can only be created via YAML configuration in Home Assistant'
+              },
+              
+              // Honest assessment
+              limitations: {
+                api_creation: 'Home Assistant does not support creating template sensors via API',
+                workarounds: 'Input helpers + automations or REST sensors can provide similar functionality',
+                yaml_required: 'True template sensors require YAML configuration and restart'
+              }
             };
           }
 
@@ -2724,6 +2732,106 @@ async function main() {
       }
     }
   };
+
+  // Helper function to generate input text helper configuration
+  function generateInputTextHelperConfig(sensorName: string, template: string): any {
+    return {
+      name: `Template Helper: ${sensorName}`,
+      min: 0,
+      max: 255,
+      initial: '',
+      mode: 'text',
+      entity_id: `input_text.template_${sensorName}`
+    };
+  }
+
+  // Helper function to generate automation configuration
+  function generateAutomationConfig(sensorName: string, template: string): any {
+    return {
+      alias: `Update Template Helper: ${sensorName}`,
+      description: `Updates template helper for ${sensorName}`,
+      mode: 'single',
+      trigger: [
+        {
+          platform: 'time_pattern',
+          minutes: '/1'
+        },
+        {
+          platform: 'homeassistant',
+          event: 'start'
+        }
+      ],
+      action: [
+        {
+          service: 'input_text.set_value',
+          target: {
+            entity_id: `input_text.template_${sensorName}`
+          },
+          data: {
+            value: template
+          }
+        }
+      ]
+    };
+  }
+
+  // Helper function to generate REST sensor configuration
+  function generateRestSensorConfig(sensorName: string, template: string, config: any): string {
+    const restConfig = {
+      platform: 'rest',
+      name: config.name || sensorName,
+      resource: `${HASS_HOST}/api/template`,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer YOUR_HASS_TOKEN`,
+        'Content-Type': 'application/json'
+      },
+      payload: JSON.stringify({
+        template: template
+      }),
+      value_template: '{{ value }}',
+      scan_interval: 60,
+      unit_of_measurement: config.unit_of_measurement,
+      device_class: config.device_class,
+      icon: config.icon
+    };
+
+    return generateRestSensorYAML(sensorName, restConfig);
+  }
+
+  // Helper function to generate REST sensor YAML configuration
+  function generateRestSensorYAML(sensorName: string, config: any): string {
+    const yamlLines = [
+      '# Add this to your configuration.yaml under sensor:',
+      'sensor:',
+      '  - platform: rest',
+      `    name: "${config.name}"`,
+      `    resource: "${config.resource}"`,
+      `    method: ${config.method}`,
+      '    headers:',
+      `      Authorization: "${config.headers.Authorization}"`,
+      `      Content-Type: "${config.headers['Content-Type']}"`,
+      `    payload: '${config.payload}'`,
+      `    value_template: "${config.value_template}"`,
+      `    scan_interval: ${config.scan_interval}`,
+    ];
+
+    if (config.unit_of_measurement) {
+      yamlLines.push(`    unit_of_measurement: "${config.unit_of_measurement}"`);
+    }
+    if (config.device_class) {
+      yamlLines.push(`    device_class: "${config.device_class}"`);
+    }
+    if (config.icon) {
+      yamlLines.push(`    icon: "${config.icon}"`);
+    }
+
+    yamlLines.push('');
+    yamlLines.push('# This approach creates a REST sensor that calls the template API automatically');
+    yamlLines.push('# The sensor will update based on the scan_interval (60 seconds by default)');
+
+    return yamlLines.join('\n');
+  }
 
   // Helper function to generate YAML configuration
   function generateTemplateSensorYAML(sensorName: string, config: any): string {
