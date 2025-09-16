@@ -3833,6 +3833,10 @@ async function main() {
       verify_area_exists?: boolean;
     }) => {
       try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not connected');
+        }
+
         // First, verify the entity exists
         const stateResponse = await fetch(`${HASS_HOST}/api/states/${params.entity_id}`, {
           headers: {
@@ -3854,52 +3858,22 @@ async function main() {
 
         const entityState = await stateResponse.json() as HassState;
 
-        // Check if device already has an area assigned
-        if (entityState.attributes?.area_id) {
-          return {
-            success: false,
-            message: `Entity '${params.entity_id}' already has area '${entityState.attributes.area_id}' assigned`,
-            entity_id: params.entity_id,
-            current_area_id: entityState.attributes.area_id,
-          };
-        }
-
-        // Verify area exists if requested
+        // Verify area exists if requested using WebSocket
         if (params.verify_area_exists) {
-          const areasResponse = await fetch(`${HASS_HOST}/api/config/area_registry`, {
-            headers: {
-              Authorization: `Bearer ${HASS_TOKEN}`,
-              'Content-Type': 'application/json',
-            },
-          });
-
-          if (areasResponse.ok) {
-            const areas = await areasResponse.json() as Array<{area_id: string; [key: string]: any}>;
-            const areaExists = areas.some((area: any) => area.area_id === params.area_id);
-            if (!areaExists) {
-              return {
-                success: false,
-                message: `Area '${params.area_id}' does not exist`,
-                entity_id: params.entity_id,
-                area_id: params.area_id,
-              };
-            }
+          const areas = await wsClient.callWS({ type: 'config/area_registry/list' }) as Array<{area_id: string; [key: string]: any}>;
+          const areaExists = areas.some((area: any) => area.area_id === params.area_id);
+          if (!areaExists) {
+            return {
+              success: false,
+              message: `Area '${params.area_id}' does not exist`,
+              entity_id: params.entity_id,
+              area_id: params.area_id,
+            };
           }
         }
 
-        // Get device_id from entity registry
-        const entityRegistryResponse = await fetch(`${HASS_HOST}/api/config/entity_registry`, {
-          headers: {
-            Authorization: `Bearer ${HASS_TOKEN}`,
-            'Content-Type': 'application/json',
-          },
-        });
-
-        if (!entityRegistryResponse.ok) {
-          throw new Error(`Failed to fetch entity registry: ${entityRegistryResponse.statusText}`);
-        }
-
-        const entityRegistry = await entityRegistryResponse.json() as Array<{entity_id: string; device_id: string; [key: string]: any}>;
+        // Get entity registry using WebSocket
+        const entityRegistry = await wsClient.callWS({ type: 'config/entity_registry/list' }) as Array<{entity_id: string; device_id: string; area_id?: string; [key: string]: any}>;
         const entityRegistryEntry = entityRegistry.find((entry: any) => entry.entity_id === params.entity_id);
 
         if (!entityRegistryEntry) {
@@ -3910,41 +3884,72 @@ async function main() {
           };
         }
 
-        const deviceId = entityRegistryEntry.device_id;
-        if (!deviceId) {
+        // Check if entity already has an area assigned (check registry, not state)
+        if (entityRegistryEntry.area_id) {
           return {
             success: false,
-            message: `Entity '${params.entity_id}' is not associated with a physical device`,
+            message: `Entity '${params.entity_id}' already has area '${entityRegistryEntry.area_id}' assigned`,
             entity_id: params.entity_id,
+            current_area_id: entityRegistryEntry.area_id,
           };
         }
 
-        // Update device area in device registry
-        const updateResponse = await fetch(`${HASS_HOST}/api/config/device_registry/${deviceId}`, {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${HASS_TOKEN}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            area_id: params.area_id,
-          }),
-        });
+        const deviceId = entityRegistryEntry.device_id;
+        
+        // For automations and other entities without devices, update entity area directly
+        if (!deviceId) {
+          try {
+            // Update entity area using WebSocket
+            const updateResult = await wsClient.callWS({
+              type: 'config/entity_registry/update',
+              entity_id: params.entity_id,
+              area_id: params.area_id,
+            });
 
-        if (!updateResponse.ok) {
-          throw new Error(`Failed to update device area: ${updateResponse.statusText}`);
+            return {
+              success: true,
+              message: `Successfully assigned area '${params.area_id}' to entity '${params.entity_id}'`,
+              entity_id: params.entity_id,
+              area_id: params.area_id,
+              entity_type: 'standalone_entity',
+              updated_entity: updateResult,
+            };
+          } catch (updateError) {
+            return {
+              success: false,
+              message: `Failed to update entity area: ${updateError instanceof Error ? updateError.message : 'Unknown error'}`,
+              entity_id: params.entity_id,
+              area_id: params.area_id,
+            };
+          }
         }
 
-        const updatedDevice = await updateResponse.json();
+        // For device-based entities, update device area using WebSocket
+        try {
+          const updateResult = await wsClient.callWS({
+            type: 'config/device_registry/update',
+            device_id: deviceId,
+            area_id: params.area_id,
+          });
 
-        return {
-          success: true,
-          message: `Successfully assigned area '${params.area_id}' to device containing entity '${params.entity_id}'`,
-          entity_id: params.entity_id,
-          device_id: deviceId,
-          area_id: params.area_id,
-          updated_device: updatedDevice,
-        };
+          return {
+            success: true,
+            message: `Successfully assigned area '${params.area_id}' to device containing entity '${params.entity_id}'`,
+            entity_id: params.entity_id,
+            device_id: deviceId,
+            area_id: params.area_id,
+            entity_type: 'device_entity',
+            updated_device: updateResult,
+          };
+        } catch (updateError) {
+          return {
+            success: false,
+            message: `Failed to update device area: ${updateError instanceof Error ? updateError.message : 'Unknown error'}`,
+            entity_id: params.entity_id,
+            device_id: deviceId,
+            area_id: params.area_id,
+          };
+        }
 
       } catch (error) {
         return {
