@@ -2343,6 +2343,422 @@ async function main() {
   };
   registerTool(removeDeviceLabelsTool);
 
+  // Add comprehensive template sensor management tool
+  const templateSensorTool = {
+    name: 'template_sensor',
+    description: 'Create, manage, and validate template sensors in Home Assistant',
+    parameters: z.object({
+      action: z.enum(['create', 'list', 'update', 'delete', 'validate_template', 'get_config'])
+        .describe('Action to perform with template sensors'),
+      
+      // Template sensor identification
+      sensor_name: z.string().optional()
+        .describe('Sensor name/ID (required for update, delete, get_config)'),
+      entity_id: z.string().optional()
+        .describe('Full entity ID (e.g., sensor.my_template_sensor)'),
+      
+      // Template sensor configuration
+      friendly_name: z.string().optional()
+        .describe('Human-readable name for the sensor'),
+      value_template: z.string().optional()
+        .describe('Jinja2 template for sensor value (required for create)'),
+      unit_of_measurement: z.string().optional()
+        .describe('Unit of measurement (e.g., °C, %, W, kWh)'),
+      device_class: z.string().optional()
+        .describe('Device class (e.g., temperature, humidity, power, energy)'),
+      state_class: z.string().optional()
+        .describe('State class (measurement, total, total_increasing)'),
+      icon: z.string().optional()
+        .describe('MDI icon (e.g., mdi:thermometer, mdi:lightbulb)'),
+      
+      // Advanced template configuration
+      attributes: z.record(z.string()).optional()
+        .describe('Additional attributes with template values'),
+      availability_template: z.string().optional()
+        .describe('Template to determine if sensor is available'),
+      unique_id: z.string().optional()
+        .describe('Unique identifier for the sensor'),
+      
+      // Validation and testing
+      test_template: z.string().optional()
+        .describe('Template to validate (for validate_template action)'),
+      
+      // Configuration management
+      config_source: z.enum(['configuration.yaml', 'ui', 'packages']).optional()
+        .describe('Where to store the template sensor configuration'),
+    }),
+    execute: async (params: {
+      action: 'create' | 'list' | 'update' | 'delete' | 'validate_template' | 'get_config';
+      sensor_name?: string;
+      entity_id?: string;
+      friendly_name?: string;
+      value_template?: string;
+      unit_of_measurement?: string;
+      device_class?: string;
+      state_class?: string;
+      icon?: string;
+      attributes?: Record<string, string>;
+      availability_template?: string;
+      unique_id?: string;
+      test_template?: string;
+      config_source?: 'configuration.yaml' | 'ui' | 'packages';
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        switch (params.action) {
+          case 'list': {
+            // Get all template sensors
+            const [entities, templateConfig] = await Promise.all([
+              wsClient.callWS({ type: 'config/entity_registry/list' }),
+              wsClient.callWS({ type: 'config/template/list' }).catch(() => [])
+            ]);
+
+            if (!Array.isArray(entities)) {
+              throw new Error('Invalid response from entity registry');
+            }
+
+            // Filter for template sensors
+            const templateSensors = entities.filter((entity: any) => 
+              entity.platform === 'template' && entity.entity_id.startsWith('sensor.')
+            );
+
+            // Get current states for template sensors
+            const sensorStates = await Promise.all(
+              templateSensors.map(async (sensor: any) => {
+                try {
+                  const response = await fetch(`${HASS_HOST}/api/states/${sensor.entity_id}`, {
+                    headers: {
+                      Authorization: `Bearer ${HASS_TOKEN}`,
+                      'Content-Type': 'application/json',
+                    },
+                  });
+                  
+                  if (response.ok) {
+                    const state = await response.json() as any;
+                    return {
+                      entity_id: sensor.entity_id,
+                      name: sensor.name || sensor.original_name,
+                      unique_id: sensor.unique_id,
+                      platform: sensor.platform,
+                      device_id: sensor.device_id,
+                      area_id: sensor.area_id,
+                      current_state: state.state,
+                      attributes: state.attributes,
+                      last_changed: state.last_changed,
+                      last_updated: state.last_updated,
+                    };
+                  }
+                  return null;
+                } catch (error) {
+                  return null;
+                }
+              })
+            );
+
+            const validSensorStates = sensorStates.filter(Boolean);
+
+            return {
+              success: true,
+              total_template_sensors: validSensorStates.length,
+              template_sensors: validSensorStates,
+              template_config_available: Array.isArray(templateConfig),
+            };
+          }
+
+          case 'validate_template': {
+            if (!params.test_template) {
+              throw new Error('test_template parameter is required for validation');
+            }
+
+            try {
+              // Use Home Assistant's template renderer to validate
+              const response = await fetch(`${HASS_HOST}/api/template`, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${HASS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  template: params.test_template
+                }),
+              });
+
+              if (response.ok) {
+                const result = await response.text();
+                return {
+                  success: true,
+                  template_valid: true,
+                  rendered_value: result,
+                  template: params.test_template,
+                };
+              } else {
+                const error = await response.text();
+                return {
+                  success: false,
+                  template_valid: false,
+                  error_message: error,
+                  template: params.test_template,
+                };
+              }
+            } catch (error) {
+              return {
+                success: false,
+                template_valid: false,
+                error_message: error instanceof Error ? error.message : 'Template validation failed',
+                template: params.test_template,
+              };
+            }
+          }
+
+          case 'create': {
+            if (!params.sensor_name) {
+              throw new Error('sensor_name is required for creating template sensor');
+            }
+            if (!params.value_template) {
+              throw new Error('value_template is required for creating template sensor');
+            }
+
+            // First validate the template
+            try {
+              const templateResponse = await fetch(`${HASS_HOST}/api/template`, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${HASS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  template: params.value_template
+                }),
+              });
+
+              if (!templateResponse.ok) {
+                const error = await templateResponse.text();
+                throw new Error(`Invalid template: ${error}`);
+              }
+            } catch (error) {
+              throw new Error(`Template validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
+
+            // Build template sensor configuration
+            const sensorConfig: any = {
+              name: params.friendly_name || params.sensor_name,
+              state: params.value_template,
+            };
+
+            if (params.unit_of_measurement) {
+              sensorConfig.unit_of_measurement = params.unit_of_measurement;
+            }
+            if (params.device_class) {
+              sensorConfig.device_class = params.device_class;
+            }
+            if (params.state_class) {
+              sensorConfig.state_class = params.state_class;
+            }
+            if (params.icon) {
+              sensorConfig.icon = params.icon;
+            }
+            if (params.availability_template) {
+              sensorConfig.availability = params.availability_template;
+            }
+            if (params.unique_id) {
+              sensorConfig.unique_id = params.unique_id;
+            }
+            if (params.attributes) {
+              sensorConfig.attributes = params.attributes;
+            }
+
+            // Try to create template sensor via configuration entry
+            try {
+              const configEntry = {
+                domain: 'template',
+                title: `Template Sensor: ${params.sensor_name}`,
+                data: {},
+                options: {
+                  sensor: {
+                    [params.sensor_name]: sensorConfig
+                  }
+                }
+              };
+
+              // This approach may not work for all Home Assistant installations
+              // Template sensors are typically configured in configuration.yaml
+              const response = await wsClient.callWS({
+                type: 'config_entries/create',
+                domain: 'template',
+                data: configEntry.data,
+                options: configEntry.options,
+                title: configEntry.title,
+              });
+
+              if (response) {
+                return {
+                  success: true,
+                  message: `Template sensor ${params.sensor_name} created successfully`,
+                  sensor_name: params.sensor_name,
+                  entity_id: `sensor.${params.sensor_name}`,
+                  configuration: sensorConfig,
+                  creation_method: 'config_entry',
+                  note: 'Sensor created via configuration entry - may require restart to appear'
+                };
+              }
+            } catch (configError) {
+              // Config entry creation failed, provide YAML configuration instead
+            }
+
+            // Generate YAML configuration for manual addition
+            const yamlConfig = generateTemplateSensorYAML(params.sensor_name, sensorConfig);
+
+            return {
+              success: true,
+              message: `Template sensor configuration generated for ${params.sensor_name}`,
+              sensor_name: params.sensor_name,
+              entity_id: `sensor.${params.sensor_name}`,
+              configuration: sensorConfig,
+              yaml_configuration: yamlConfig,
+              creation_method: 'yaml_generation',
+              instructions: 'Add the YAML configuration to your configuration.yaml file under the template: section and restart Home Assistant'
+            };
+          }
+
+          case 'get_config': {
+            const entityId = params.entity_id || (params.sensor_name ? `sensor.${params.sensor_name}` : undefined);
+            
+            if (!entityId) {
+              throw new Error('entity_id or sensor_name is required');
+            }
+
+            // Get entity registry info
+            const entities = await wsClient.callWS({ type: 'config/entity_registry/list' });
+            if (!Array.isArray(entities)) {
+              throw new Error('Invalid response from entity registry');
+            }
+
+            const entity = entities.find((e: any) => e.entity_id === entityId);
+            if (!entity || entity.platform !== 'template') {
+              throw new Error(`Template sensor ${entityId} not found`);
+            }
+
+            // Get current state
+            const response = await fetch(`${HASS_HOST}/api/states/${entityId}`, {
+              headers: {
+                Authorization: `Bearer ${HASS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            });
+
+            if (!response.ok) {
+              throw new Error(`Failed to get sensor state: ${response.statusText}`);
+            }
+
+            const state = await response.json() as any;
+
+            return {
+              success: true,
+              entity_id: entityId,
+              name: entity.name || entity.original_name,
+              unique_id: entity.unique_id,
+              platform: entity.platform,
+              device_id: entity.device_id,
+              area_id: entity.area_id,
+              current_state: state.state,
+              attributes: state.attributes,
+              last_changed: state.last_changed,
+              last_updated: state.last_updated,
+              registry_info: entity,
+            };
+          }
+
+          case 'delete': {
+            const entityId = params.entity_id || (params.sensor_name ? `sensor.${params.sensor_name}` : undefined);
+            
+            if (!entityId) {
+              throw new Error('entity_id or sensor_name is required for deletion');
+            }
+
+            // Get entity registry info
+            const entities = await wsClient.callWS({ type: 'config/entity_registry/list' });
+            if (!Array.isArray(entities)) {
+              throw new Error('Invalid response from entity registry');
+            }
+
+            const entity = entities.find((e: any) => e.entity_id === entityId);
+            if (!entity || entity.platform !== 'template') {
+              throw new Error(`Template sensor ${entityId} not found`);
+            }
+
+            try {
+              // Try to remove from entity registry
+              await wsClient.callWS({
+                type: 'config/entity_registry/remove',
+                entity_id: entityId,
+              });
+
+              return {
+                success: true,
+                message: `Template sensor ${entityId} removed from entity registry`,
+                entity_id: entityId,
+                note: 'Sensor removed from registry - you may also need to remove it from configuration.yaml'
+              };
+            } catch (error) {
+              return {
+                success: false,
+                message: `Failed to delete template sensor: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                entity_id: entityId,
+                note: 'Template sensors configured in YAML cannot be deleted via API - remove from configuration.yaml manually'
+              };
+            }
+          }
+
+          default:
+            throw new Error(`Invalid action: ${params.action}`);
+        }
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+        };
+      }
+    }
+  };
+
+  // Helper function to generate YAML configuration
+  function generateTemplateSensorYAML(sensorName: string, config: any): string {
+    let yaml = `template:\n  - sensor:\n      - name: "${config.name || sensorName}"\n        state: "${config.state}"`;
+    
+    if (config.unit_of_measurement) {
+      yaml += `\n        unit_of_measurement: "${config.unit_of_measurement}"`;
+    }
+    if (config.device_class) {
+      yaml += `\n        device_class: "${config.device_class}"`;
+    }
+    if (config.state_class) {
+      yaml += `\n        state_class: "${config.state_class}"`;
+    }
+    if (config.icon) {
+      yaml += `\n        icon: "${config.icon}"`;
+    }
+    if (config.unique_id) {
+      yaml += `\n        unique_id: "${config.unique_id}"`;
+    }
+    if (config.availability) {
+      yaml += `\n        availability: "${config.availability}"`;
+    }
+    if (config.attributes) {
+      yaml += `\n        attributes:`;
+      Object.entries(config.attributes).forEach(([key, value]) => {
+        yaml += `\n          ${key}: "${value}"`;
+      });
+    }
+    
+    return yaml;
+  }
+
+  registerTool(templateSensorTool);
+
   // Add the device details tool
   const deviceDetailsTool = {
     name: 'get_device_details',
