@@ -213,46 +213,6 @@ app.get('/automations', async (req, res) => {
   }
 });
 
-app.get('/automations/:automation_id/config', async (req, res) => {
-  try {
-    // Get token from Authorization header
-    const token = req.headers.authorization?.replace('Bearer ', '');
-
-    if (!token || token !== HASS_TOKEN) {
-      return res.status(401).json({
-        success: false,
-        message: 'Unauthorized - Invalid token'
-      });
-    }
-
-    const tool = tools.find(t => t.name === 'automation');
-    if (!tool) {
-      return res.status(404).json({
-        success: false,
-        message: 'Tool not found'
-      });
-    }
-
-    const result = await tool.execute({ 
-      action: 'get_config', 
-      automation_id: req.params.automation_id 
-    });
-    res.json(result);
-  } catch (error) {
-    logger.error('Error in /automations/:automation_id/config endpoint', error instanceof Error ? error : new Error(String(error)), {
-      endpoint: '/automations/:automation_id/config',
-      method: 'GET',
-      hasToken: !!req.headers.authorization,
-      automationId: req.params.automation_id,
-      timestamp: new Date().toISOString()
-    });
-    
-    res.status(500).json({
-      success: false,
-      message: error instanceof Error ? error.message : 'Unknown error occurred'
-    });
-  }
-});
 
 app.get('/automations/:automation_id/yaml', async (req, res) => {
   try {
@@ -712,7 +672,7 @@ interface NotifyParams {
 }
 
 interface AutomationParams {
-  action: 'list' | 'toggle' | 'trigger' | 'get_config' | 'get_yaml' | 'create' | 'validate' | 'update';
+  action: 'list' | 'toggle' | 'trigger' | 'get_yaml' | 'create' | 'validate' | 'update';
   automation_id?: string;
   // Fields for automation creation
   alias?: string;
@@ -2365,12 +2325,12 @@ async function main() {
     name: 'template_sensor',
     description: 'Create, manage, and validate template sensors in Home Assistant',
     parameters: z.object({
-      action: z.enum(['create', 'list', 'update', 'delete', 'validate_template', 'get_config'])
+      action: z.enum(['create', 'list', 'update', 'delete', 'validate_template'])
         .describe('Action to perform with template sensors'),
       
       // Template sensor identification
       sensor_name: z.string().optional()
-        .describe('Sensor name/ID (required for update, delete, get_config)'),
+        .describe('Sensor name/ID (required for update, delete)'),
       entity_id: z.string().optional()
         .describe('Full entity ID (e.g., sensor.my_template_sensor)'),
       
@@ -2405,7 +2365,7 @@ async function main() {
         .describe('Where to store the template sensor configuration'),
     }),
     execute: async (params: {
-      action: 'create' | 'list' | 'update' | 'delete' | 'validate_template' | 'get_config';
+      action: 'create' | 'list' | 'update' | 'delete' | 'validate_template';
       sensor_name?: string;
       entity_id?: string;
       friendly_name?: string;
@@ -2648,53 +2608,7 @@ async function main() {
             };
           }
 
-          case 'get_config': {
-            const entityId = params.entity_id || (params.sensor_name ? `sensor.${params.sensor_name}` : undefined);
-            
-            if (!entityId) {
-              throw new Error('entity_id or sensor_name is required');
-            }
 
-            // Get entity registry info
-            const entities = await wsClient.callWS({ type: 'config/entity_registry/list' });
-            if (!Array.isArray(entities)) {
-              throw new Error('Invalid response from entity registry');
-            }
-
-            const entity = entities.find((e: any) => e.entity_id === entityId);
-            if (!entity || entity.platform !== 'template') {
-              throw new Error(`Template sensor ${entityId} not found`);
-            }
-
-            // Get current state
-            const response = await fetch(`${HASS_HOST}/api/states/${entityId}`, {
-              headers: {
-                Authorization: `Bearer ${HASS_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-            });
-
-            if (!response.ok) {
-              throw new Error(`Failed to get sensor state: ${response.statusText}`);
-            }
-
-            const state = await response.json() as any;
-
-            return {
-              success: true,
-              entity_id: entityId,
-              name: entity.name || entity.original_name,
-              unique_id: entity.unique_id,
-              platform: entity.platform,
-              device_id: entity.device_id,
-              area_id: entity.area_id,
-              current_state: state.state,
-              attributes: state.attributes,
-              last_changed: state.last_changed,
-              last_updated: state.last_updated,
-              registry_info: entity,
-            };
-          }
 
           case 'delete': {
             const entityId = params.entity_id || (params.sensor_name ? `sensor.${params.sensor_name}` : undefined);
@@ -4453,8 +4367,8 @@ async function main() {
     name: 'automation',
     description: 'Manage Home Assistant automations with enhanced reliability - features robust ID handling (supports both automation.entity_id and numeric ID formats), configuration validation, update verification, comprehensive error reporting, and automatic retry logic for improved success rates',
     parameters: z.object({
-      action: z.enum(['list', 'toggle', 'trigger', 'get_config', 'get_yaml', 'create', 'validate', 'update']).describe('Action to perform with automation'),
-      automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_config, get_yaml, and update actions). Supports multiple formats: full entity ID (automation.my_automation), numeric ID (1718469913974), or entity name (my_automation). The system will automatically try all formats for maximum compatibility.'),
+      action: z.enum(['list', 'toggle', 'trigger', 'get_yaml', 'create', 'validate', 'update']).describe('Action to perform with automation'),
+      automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_yaml, and update actions). Supports multiple formats: full entity ID (automation.my_automation), numeric ID (1718469913974), or entity name (my_automation). The system will automatically try all formats for maximum compatibility.'),
       // Fields for automation creation
       alias: z.string().optional().describe('Automation name/alias (required for create action)'),
       description: z.string().optional().describe('Automation description'),
@@ -4504,84 +4418,7 @@ async function main() {
               mode: automation.attributes.mode || null,
             })),
           };
-        } else if (params.action === 'get_config') {
-          if (!params.automation_id) {
-            throw new Error('Automation ID is required for get_config action');
-          }
 
-          // Use enhanced automation information retrieval
-          const result = await getAutomationInfo(
-            params.automation_id,
-            HASS_HOST!,
-            HASS_TOKEN!
-          );
-
-          if (!result.success) {
-            throw new Error(result.message || 'Failed to retrieve automation information');
-          }
-
-          // First, try WebSocket API for automation config if available
-          if (wsClient && !result.config) {
-            try {
-              const wsConfig = await wsClient.getAutomationConfig(params.automation_id);
-              if (wsConfig && wsConfig.config) {
-                return {
-                  success: true,
-                  automation_config: {
-                    entity_id: result.entity_id,
-                    alias: wsConfig.config.alias,
-                    description: wsConfig.config.description || null,
-                    mode: wsConfig.config.mode || 'single',
-                    trigger: wsConfig.config.trigger,
-                    condition: wsConfig.config.condition || [],
-                    action: wsConfig.config.action,
-                  },
-                  source: 'websocket_api',
-                  retrieval_method: 'enhanced_with_websocket_fallback'
-                };
-              }
-            } catch (wsError) {
-              // WebSocket API failed, continue with enhanced result
-              logger.warn(`WebSocket automation config retrieval failed: ${wsError}`);
-            }
-          }
-
-          // Return enhanced result
-          if (result.config) {
-            return {
-              success: true,
-              automation_config: {
-                entity_id: result.entity_id,
-                alias: result.config.alias,
-                description: result.config.description || null,
-                mode: result.config.mode || 'single',
-                trigger: result.config.trigger || [],
-                condition: result.config.condition || [],
-                action: result.config.action || [],
-              },
-              source: result.source,
-              retrieval_method: 'enhanced_automation_info'
-            };
-          } else if (result.state) {
-            // Fallback to state-based information
-            return {
-              success: true,
-              automation_config: {
-                entity_id: result.entity_id,
-                alias: result.state.attributes?.friendly_name || result.entity_id,
-                description: result.state.attributes?.description || null,
-                mode: result.state.attributes?.mode || 'single',
-                trigger: [], // Not available from state API
-                condition: [], // Not available from state API  
-                action: [], // Not available from state API
-              },
-              source: result.source,
-              retrieval_method: 'enhanced_state_fallback',
-              note: 'Limited information available - full configuration not accessible via API for this automation'
-            };
-          } else {
-            throw new Error(`Unable to retrieve automation configuration for ${params.automation_id}`);
-          }
         } else if (params.action === 'get_yaml') {
           if (!params.automation_id) {
             throw new Error('Automation ID is required for get_yaml action');
@@ -5017,7 +4854,7 @@ automation:
           };
         } else {
           if (!params.automation_id) {
-            throw new Error('Automation ID is required for toggle, trigger, get_config, get_yaml, and update actions');
+            throw new Error('Automation ID is required for toggle, trigger, get_yaml, and update actions');
           }
 
           const service = params.action === 'toggle' ? 'toggle' : 'trigger';
@@ -5045,7 +4882,7 @@ automation:
         }
 
         // This should never be reached due to z.enum validation, but included for safety
-        throw new Error(`Invalid action: ${params.action}. Must be one of: list, toggle, trigger, get_config, get_yaml, create, validate, update`);
+        throw new Error(`Invalid action: ${params.action}. Must be one of: list, toggle, trigger, get_yaml, create, validate, update`);
       } catch (error) {
         return {
           success: false,
