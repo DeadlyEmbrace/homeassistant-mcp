@@ -22,6 +22,7 @@ import {
   validateAutomationConfig, 
   getAutomationInfo,
   resolveAutomationId,
+  getActualAutomationId,
   type AutomationConfig as AutomationConfigType,
   type AutomationUpdateResult 
 } from './utils/automation-helpers.js';

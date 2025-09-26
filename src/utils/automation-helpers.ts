@@ -69,6 +69,124 @@ export function resolveAutomationId(automationInput: string): AutomationIdResolu
 }
 
 /**
+ * Get the actual internal automation ID by looking up the automation configuration
+ * This is critical for updates to work correctly - entity IDs are not the same as internal IDs
+ */
+export async function getActualAutomationId(
+  automationInput: string,
+  hassHost: string,
+  hassToken: string
+): Promise<{ success: boolean; internal_id?: string; entity_id?: string; message: string }> {
+  const resolved = resolveAutomationId(automationInput);
+  
+  try {
+    // First, try to get all automation configs to find the correct internal ID
+    const configListResponse = await fetch(`${hassHost}/api/config/automation/config`, {
+      headers: {
+        Authorization: `Bearer ${hassToken}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (configListResponse.ok) {
+      const allConfigs = await configListResponse.json() as Array<{ id: string; alias?: string; [key: string]: any }>;
+      
+      // Look for automation by entity ID or alias
+      for (const config of allConfigs) {
+        const configEntityId = `automation.${config.id || 'unknown'}`;
+        
+        // Match by entity ID suffix or by alias
+        if (configEntityId === resolved.entity_id || 
+            config.id === resolved.numeric_id ||
+            config.alias === resolved.numeric_id ||
+            (config.alias && config.alias.toLowerCase().replace(/[^a-z0-9]/g, '_') === resolved.numeric_id)) {
+          
+          // Get the state to confirm this is the right automation
+          try {
+            const stateResponse = await fetch(`${hassHost}/api/states/${configEntityId}`, {
+              headers: {
+                Authorization: `Bearer ${hassToken}`,
+                'Content-Type': 'application/json',
+              },
+            });
+            
+            if (stateResponse.ok) {
+              const state = await stateResponse.json();
+              return {
+                success: true,
+                internal_id: config.id,
+                entity_id: configEntityId,
+                message: `Found automation with internal ID ${config.id} and entity ID ${configEntityId}`
+              };
+            }
+          } catch (stateError) {
+            // Continue searching if state check fails
+          }
+        }
+      }
+    }
+    
+    // If we didn't find it in the config list, try direct numeric ID lookup
+    if (/^\d+$/.test(resolved.numeric_id)) {
+      try {
+        const directConfigResponse = await fetch(`${hassHost}/api/config/automation/config/${resolved.numeric_id}`, {
+          headers: {
+            Authorization: `Bearer ${hassToken}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (directConfigResponse.ok) {
+          const config = await directConfigResponse.json() as { id?: string; [key: string]: any };
+          return {
+            success: true,
+            internal_id: resolved.numeric_id,
+            entity_id: `automation.${config.id || resolved.numeric_id}`,
+            message: `Found automation with direct numeric ID lookup: ${resolved.numeric_id}`
+          };
+        }
+      } catch (directError) {
+        // Continue to final state-based lookup
+      }
+    }
+
+    // Final fallback: try to verify the entity exists in states
+    try {
+      const stateResponse = await fetch(`${hassHost}/api/states/${resolved.entity_id}`, {
+        headers: {
+          Authorization: `Bearer ${hassToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (stateResponse.ok) {
+        const state = await stateResponse.json();
+        // We know the entity exists, but we need to find its internal ID
+        // This is a limitation - we found the entity but can't determine the internal ID
+        return {
+          success: false,
+          entity_id: resolved.entity_id,
+          message: `Found automation entity ${resolved.entity_id} but could not determine internal ID needed for updates. This automation may need to be managed through the Home Assistant UI.`
+        };
+      }
+    } catch (stateError) {
+      // Continue to error case
+    }
+
+    return {
+      success: false,
+      message: `Automation not found with any of the attempted methods: entity ID ${resolved.entity_id}, potential internal ID ${resolved.numeric_id}`
+    };
+
+  } catch (error) {
+    return {
+      success: false,
+      message: `Failed to lookup automation ID: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+}
+
+/**
  * Validate a single Home Assistant condition
  */
 function validateHomeAssistantCondition(condition: any): { valid: boolean; error?: string } {
@@ -355,6 +473,7 @@ export function configsAreEqual(config1: AutomationConfig, config2: AutomationCo
 
 /**
  * Attempt to update automation and verify the change actually applied
+ * CRITICAL FIX: This now properly resolves the actual internal automation ID to prevent creating duplicate automations
  */
 export async function updateAutomationWithVerification(
   automationId: string,
@@ -365,8 +484,28 @@ export async function updateAutomationWithVerification(
   const resolved = resolveAutomationId(automationId);
   
   try {
+    // CRITICAL: Get the actual internal automation ID first
+    // This prevents creating new automations when we should be updating existing ones
+    const idLookup = await getActualAutomationId(automationId, hassHost, hassToken);
+    
+    if (!idLookup.success || !idLookup.internal_id) {
+      return {
+        success: false,
+        message: `Cannot update automation: ${idLookup.message}. Unable to determine the internal automation ID needed for updates. This commonly happens when trying to update automations using entity IDs instead of their internal numeric IDs.`,
+        debug_info: {
+          resolved_ids: resolved,
+          id_lookup_result: idLookup,
+          config_validation: validateAutomationConfig(config),
+          fix_suggestion: "To fix this, either: 1) Use the automation's numeric ID instead of entity ID, 2) Create a new automation, or 3) Use the Home Assistant UI to edit this automation"
+        }
+      };
+    }
+
+    const actualInternalId = idLookup.internal_id;
+    const actualEntityId = idLookup.entity_id || resolved.entity_id;
+    
     // Get current config for comparison
-    const oldConfig = await getCurrentAutomationConfig(automationId, hassHost, hassToken);
+    const oldConfig = await getCurrentAutomationConfig(actualInternalId, hassHost, hassToken);
     
     // Validate new config
     const validation = validateAutomationConfig(config);
@@ -376,19 +515,21 @@ export async function updateAutomationWithVerification(
         message: `Configuration validation failed: ${validation.errors.join(', ')}`,
         debug_info: {
           resolved_ids: resolved,
+          actual_internal_id: actualInternalId,
+          actual_entity_id: actualEntityId,
           config_validation: validation
         }
       };
     }
 
-    // Prepare config with ID
+    // Prepare config with the ACTUAL internal ID (not the entity ID suffix)
     const configWithId = {
-      id: resolved.numeric_id,
+      id: actualInternalId,
       ...config
     };
 
-    // Attempt update
-    const response = await fetch(`${hassHost}/api/config/automation/config/${resolved.numeric_id}`, {
+    // Attempt update using the correct internal ID
+    const response = await fetch(`${hassHost}/api/config/automation/config/${actualInternalId}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${hassToken}`,
@@ -402,9 +543,11 @@ export async function updateAutomationWithVerification(
       return {
         success: false,
         message: `Update failed: ${response.status} ${response.statusText} - ${errorText}`,
-        attempted_ids: [resolved.numeric_id],
+        attempted_ids: [actualInternalId],
         debug_info: {
           resolved_ids: resolved,
+          actual_internal_id: actualInternalId,
+          actual_entity_id: actualEntityId,
           config_validation: validation
         }
       };
@@ -415,17 +558,19 @@ export async function updateAutomationWithVerification(
 
     // Verify the update actually applied
     if (oldConfig) {
-      const newConfig = await getCurrentAutomationConfig(automationId, hassHost, hassToken);
+      const newConfig = await getCurrentAutomationConfig(actualInternalId, hassHost, hassToken);
       
       if (newConfig && configsAreEqual(newConfig, oldConfig)) {
         return {
           success: false,
           message: 'Update reported success but configuration unchanged',
           verified: false,
-          automation_id: resolved.numeric_id,
-          entity_id: resolved.entity_id,
+          automation_id: actualInternalId,
+          entity_id: actualEntityId,
           debug_info: {
             resolved_ids: resolved,
+            actual_internal_id: actualInternalId,
+            actual_entity_id: actualEntityId,
             config_validation: validation
           }
         };
@@ -438,8 +583,15 @@ export async function updateAutomationWithVerification(
       success: true,
       message: `Successfully updated automation: ${config.alias}`,
       verified: true,
-      automation_id: responseData.automation_id || resolved.numeric_id,
-      entity_id: resolved.entity_id
+      automation_id: responseData.automation_id || actualInternalId,
+      entity_id: actualEntityId,
+      debug_info: {
+        resolved_ids: resolved,
+        actual_internal_id: actualInternalId,
+        actual_entity_id: actualEntityId,
+        config_validation: validation,
+        used_proper_id_resolution: true
+      }
     };
 
   } catch (error) {
@@ -449,7 +601,8 @@ export async function updateAutomationWithVerification(
       attempted_ids: [resolved.numeric_id],
       debug_info: {
         resolved_ids: resolved,
-        config_validation: validateAutomationConfig(config)
+        config_validation: validateAutomationConfig(config),
+        error: error instanceof Error ? error.message : String(error)
       }
     };
   }
@@ -457,6 +610,7 @@ export async function updateAutomationWithVerification(
 
 /**
  * Try multiple approaches to update automation with retry logic
+ * FIXED: Now uses proper ID resolution instead of guessing formats
  */
 export async function updateAutomationRobust(
   automationId: string,
@@ -464,59 +618,9 @@ export async function updateAutomationRobust(
   hassHost: string,
   hassToken: string
 ): Promise<AutomationUpdateResult> {
-  const resolved = resolveAutomationId(automationId);
-  const attemptedIds: string[] = [];
-  
-  // Try both ID formats
-  for (const idVariant of resolved.both_formats) {
-    attemptedIds.push(idVariant);
-    
-    try {
-      const result = await updateAutomationWithVerification(idVariant, config, hassHost, hassToken);
-      
-      if (result.success) {
-        result.attempted_ids = attemptedIds;
-        return result;
-      }
-      
-      // If this wasn't the last attempt, continue to next format
-      if (idVariant !== resolved.both_formats[resolved.both_formats.length - 1]) {
-        logger.info(`Update attempt with ID '${idVariant}' failed, trying next format`);
-        continue;
-      }
-      
-      // Last attempt failed, return the result with debug info
-      result.attempted_ids = attemptedIds;
-      return result;
-      
-    } catch (error) {
-      if (idVariant === resolved.both_formats[resolved.both_formats.length - 1]) {
-        // Last attempt failed
-        return {
-          success: false,
-          message: `All update attempts failed. Last error: ${error instanceof Error ? error.message : String(error)}`,
-          attempted_ids: attemptedIds,
-          debug_info: {
-            resolved_ids: resolved,
-            config_validation: validateAutomationConfig(config)
-          }
-        };
-      }
-      // Continue to next attempt
-      continue;
-    }
-  }
-
-  // This should never be reached, but just in case
-  return {
-    success: false,
-    message: 'No update attempts were made',
-    attempted_ids: attemptedIds,
-    debug_info: {
-      resolved_ids: resolved,
-      config_validation: validateAutomationConfig(config)
-    }
-  };
+  // The new updateAutomationWithVerification already handles proper ID resolution
+  // No need for multiple attempts - we now correctly identify the internal ID first
+  return await updateAutomationWithVerification(automationId, config, hassHost, hassToken);
 }
 
 /**
