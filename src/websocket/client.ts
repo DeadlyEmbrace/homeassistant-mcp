@@ -235,6 +235,10 @@ export class HassWebSocketClient extends EventEmitter {
         }
     }
 
+    public isConnected(): boolean {
+        return this.ws?.readyState === WebSocket.OPEN && this.authenticated;
+    }
+
     public disconnect(): void {
         if (this.ws) {
             this.ws.close();

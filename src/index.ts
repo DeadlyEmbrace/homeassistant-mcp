@@ -17,6 +17,14 @@ import express from 'express';
 import { rateLimiter, securityHeaders, corsMiddleware, validateRequest, sanitizeInput, errorHandler } from './security/index.js';
 import { logger } from './utils/logger.js';
 import { HassWebSocketClient } from './websocket/client.js';
+import { 
+  updateAutomationWithDebug, 
+  validateAutomationConfig, 
+  getAutomationInfo,
+  resolveAutomationId,
+  type AutomationConfig as AutomationConfigType,
+  type AutomationUpdateResult 
+} from './utils/automation-helpers.js';
 
 import { get_hass } from './hass/index.js';
 import { LiteMCP } from 'litemcp';
@@ -4443,10 +4451,10 @@ async function main() {
   // Add the automation tool
   const automationTool = {
     name: 'automation',
-    description: 'Manage Home Assistant automations',
+    description: 'Manage Home Assistant automations with enhanced reliability - features robust ID handling (supports both automation.entity_id and numeric ID formats), configuration validation, update verification, comprehensive error reporting, and automatic retry logic for improved success rates',
     parameters: z.object({
       action: z.enum(['list', 'toggle', 'trigger', 'get_config', 'get_yaml', 'create', 'validate', 'update']).describe('Action to perform with automation'),
-      automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_config, get_yaml, and update actions)'),
+      automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_config, get_yaml, and update actions). Supports multiple formats: full entity ID (automation.my_automation), numeric ID (1718469913974), or entity name (my_automation). The system will automatically try all formats for maximum compatibility.'),
       // Fields for automation creation
       alias: z.string().optional().describe('Automation name/alias (required for create action)'),
       description: z.string().optional().describe('Automation description'),
@@ -4462,7 +4470,7 @@ async function main() {
         trigger: z.array(z.any()).optional(),
         condition: z.array(z.any()).optional(),
         action: z.array(z.any()).optional(),
-      }).optional().describe('Complete automation configuration (required for update action)'),
+      }).optional().describe('Complete automation configuration (required for update action). Configuration is automatically validated before sending to Home Assistant, and updates are verified to ensure they actually applied. Includes retry logic with multiple ID formats if the first attempt fails.'),
       // Validation-only fields
       validate_trigger: z.any().optional().describe('Trigger configuration to validate'),
       validate_condition: z.any().optional().describe('Condition configuration to validate'),
@@ -4501,15 +4509,26 @@ async function main() {
             throw new Error('Automation ID is required for get_config action');
           }
 
-          // First, try WebSocket API for automation config
-          if (wsClient) {
+          // Use enhanced automation information retrieval
+          const result = await getAutomationInfo(
+            params.automation_id,
+            HASS_HOST!,
+            HASS_TOKEN!
+          );
+
+          if (!result.success) {
+            throw new Error(result.message || 'Failed to retrieve automation information');
+          }
+
+          // First, try WebSocket API for automation config if available
+          if (wsClient && !result.config) {
             try {
               const wsConfig = await wsClient.getAutomationConfig(params.automation_id);
               if (wsConfig && wsConfig.config) {
                 return {
                   success: true,
                   automation_config: {
-                    entity_id: params.automation_id,
+                    entity_id: result.entity_id,
                     alias: wsConfig.config.alias,
                     description: wsConfig.config.description || null,
                     mode: wsConfig.config.mode || 'single',
@@ -4517,77 +4536,52 @@ async function main() {
                     condition: wsConfig.config.condition || [],
                     action: wsConfig.config.action,
                   },
-                  source: 'websocket_api'
+                  source: 'websocket_api',
+                  retrieval_method: 'enhanced_with_websocket_fallback'
                 };
               }
             } catch (wsError) {
-              // WebSocket API failed, continue with other methods
+              // WebSocket API failed, continue with enhanced result
+              logger.warn(`WebSocket automation config retrieval failed: ${wsError}`);
             }
           }
 
-          // Get the automation state with attributes which might contain more details
-          const stateResponse = await fetch(`${HASS_HOST}/api/states/${params.automation_id}`, {
-            headers: {
-              Authorization: `Bearer ${HASS_TOKEN}`,
-              'Content-Type': 'application/json',
-            },
-          });
-
-          if (!stateResponse.ok) {
-            throw new Error(`Failed to get automation state: ${stateResponse.status} ${stateResponse.statusText}`);
-          }
-
-          const stateData = await stateResponse.json() as HassState;
-
-          // Try to get detailed configuration from the config API
-          // Extract automation ID - if it starts with 'automation.', remove that prefix
-          const automationId = params.automation_id.startsWith('automation.') 
-            ? params.automation_id.substring('automation.'.length)
-            : params.automation_id;
-
-          try {
-            // Try the config API
-            const configResponse = await fetch(`${HASS_HOST}/api/config/automation/config/${automationId}`, {
-              headers: {
-                Authorization: `Bearer ${HASS_TOKEN}`,
-                'Content-Type': 'application/json',
+          // Return enhanced result
+          if (result.config) {
+            return {
+              success: true,
+              automation_config: {
+                entity_id: result.entity_id,
+                alias: result.config.alias,
+                description: result.config.description || null,
+                mode: result.config.mode || 'single',
+                trigger: result.config.trigger || [],
+                condition: result.config.condition || [],
+                action: result.config.action || [],
               },
-            });
-
-            if (configResponse.ok) {
-              const config = await configResponse.json() as AutomationConfig;
-              return {
-                success: true,
-                automation_config: {
-                  entity_id: params.automation_id,
-                  alias: config.alias,
-                  description: config.description || null,
-                  mode: config.mode || 'single',
-                  trigger: config.trigger,
-                  condition: config.condition || [],
-                  action: config.action,
-                },
-                source: 'config_api'
-              };
-            }
-          } catch (configError) {
-            // Config API failed, continue with state-based response
-          }
-
-          // If config API fails, return what we can from the state
-          return {
-            success: true,
-            automation_config: {
-              entity_id: params.automation_id,
-              alias: stateData.attributes.friendly_name || params.automation_id,
-              description: stateData.attributes.description || null,
-              mode: stateData.attributes.mode || 'single',
-              trigger: [], // Not available from state API
-              condition: [], // Not available from state API  
-              action: [], // Not available from state API
+              source: result.source,
+              retrieval_method: 'enhanced_automation_info'
+            };
+          } else if (result.state) {
+            // Fallback to state-based information
+            return {
+              success: true,
+              automation_config: {
+                entity_id: result.entity_id,
+                alias: result.state.attributes?.friendly_name || result.entity_id,
+                description: result.state.attributes?.description || null,
+                mode: result.state.attributes?.mode || 'single',
+                trigger: [], // Not available from state API
+                condition: [], // Not available from state API  
+                action: [], // Not available from state API
+              },
+              source: result.source,
+              retrieval_method: 'enhanced_state_fallback',
               note: 'Limited information available - full configuration not accessible via API for this automation'
-            },
-          };
+            };
+          } else {
+            throw new Error(`Unable to retrieve automation configuration for ${params.automation_id}`);
+          }
         } else if (params.action === 'get_yaml') {
           if (!params.automation_id) {
             throw new Error('Automation ID is required for get_yaml action');
@@ -4997,41 +4991,29 @@ automation:
             throw new Error('Automation ID and configuration are required for update action');
           }
 
-          // Add the automation ID to the config for Home Assistant API
-          const automationId = params.automation_id.replace('automation.', '');
-          const configWithId = {
-            id: automationId,
-            ...params.config
-          };
+          // Use enhanced automation update with validation and verification
+          const result = await updateAutomationWithDebug(
+            params.automation_id,
+            params.config as AutomationConfigType,
+            HASS_HOST!,
+            HASS_TOKEN!,
+            wsClient
+          );
 
-          const response = await fetch(`${HASS_HOST}/api/config/automation/config/${automationId}`, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${HASS_TOKEN}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(configWithId),
-          });
-
-          if (!response.ok) {
-            throw new Error(`Failed to update automation: ${response.statusText}`);
-          }
-
-          // Reload automations to apply changes
-          if (wsClient) {
+          // Reload automations to apply changes if update was successful
+          if (result.success && wsClient) {
             try {
               await wsClient.callService('automation', 'reload');
             } catch (reloadError) {
-              // Continue even if reload fails - the update might still have worked
+              // Continue even if reload fails - the update worked
+              logger.warn(`Automation reload failed but update succeeded: ${reloadError}`);
             }
           }
 
+          // Return enhanced result with additional metadata
           return {
-            success: true,
-            message: `Successfully updated automation: ${params.config?.alias || params.automation_id}`,
-            automation_id: automationId,
-            entity_id: `automation.${automationId}`,
-            source: 'rest_api_update'
+            ...result,
+            source: 'enhanced_update_with_verification'
           };
         } else {
           if (!params.automation_id) {
@@ -5922,10 +5904,10 @@ automation:
   // Extend the automation tool with more functionality
   const automationConfigTool = {
     name: 'automation_config',
-    description: 'Advanced automation configuration and management',
+    description: 'Advanced automation configuration and management with enhanced reliability features. Includes automatic configuration validation, update verification, robust ID resolution, comprehensive error reporting, and retry logic for maximum success rates.',
     parameters: z.object({
       action: z.enum(['create', 'update', 'delete', 'duplicate']).describe('Action to perform with automation config'),
-      automation_id: z.string().optional().describe('Automation ID (required for update, delete, and duplicate)'),
+      automation_id: z.string().optional().describe('Automation ID (required for update, delete, and duplicate). Supports multiple formats: full entity ID (automation.my_automation), numeric ID (1718469913974), or entity name (my_automation). Automatic format resolution ensures maximum compatibility.'),
       config: z.object({
         alias: z.string().describe('Friendly name for the automation'),
         description: z.string().optional().describe('Description of what the automation does'),
@@ -5933,7 +5915,7 @@ automation:
         trigger: z.array(z.any()).describe('List of triggers'),
         condition: z.array(z.any()).optional().describe('List of conditions'),
         action: z.array(z.any()).describe('List of actions'),
-      }).optional().describe('Automation configuration (required for create and update)'),
+      }).optional().describe('Automation configuration (required for create and update). Configuration is automatically validated for required fields, proper structure, and common errors before sending to Home Assistant. Updates are verified to ensure they actually applied, with detailed debugging information provided if issues occur.'),
     }),
     execute: async (params: AutomationConfigParams) => {
       try {
@@ -5969,30 +5951,27 @@ automation:
               throw new Error('Automation ID and configuration are required for updating automation');
             }
 
-            // Add the automation ID to the config for Home Assistant API
-            const configWithId = {
-              id: params.automation_id.replace('automation.', ''),
-              ...params.config
-            };
+            // Use enhanced automation update with validation and verification
+            const result = await updateAutomationWithDebug(
+              params.automation_id,
+              params.config as AutomationConfigType,
+              HASS_HOST!,
+              HASS_TOKEN!,
+              wsClient
+            );
 
-            const response = await fetch(`${HASS_HOST}/api/config/automation/config/${params.automation_id.replace('automation.', '')}`, {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${HASS_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(configWithId),
-            });
-
-            if (!response.ok) {
-              throw new Error(`Failed to update automation: ${response.statusText}`);
+            // If successful, try to reload automations
+            if (result.success && wsClient) {
+              try {
+                await wsClient.callService('automation', 'reload');
+              } catch (reloadError) {
+                logger.warn(`Automation reload failed but update succeeded: ${reloadError}`);
+              }
             }
 
-            const responseData = await response.json() as { automation_id: string };
             return {
-              success: true,
-              automation_id: responseData.automation_id,
-              message: 'Automation updated successfully'
+              ...result,
+              source: 'manage_automation_config_enhanced_update'
             };
           }
 
@@ -6024,20 +6003,30 @@ automation:
               throw new Error('Automation ID is required for duplicating automation');
             }
 
-            // First, get the existing automation config
-            const getResponse = await fetch(`${HASS_HOST}/api/config/automation/config/${params.automation_id}`, {
-              headers: {
-                Authorization: `Bearer ${HASS_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-            });
+            // Use enhanced automation info retrieval to get the config
+            const result = await getAutomationInfo(
+              params.automation_id,
+              HASS_HOST!,
+              HASS_TOKEN!
+            );
 
-            if (!getResponse.ok) {
-              throw new Error(`Failed to get automation config: ${getResponse.statusText}`);
+            if (!result.success || !result.config) {
+              throw new Error(`Failed to get automation config for duplication: ${result.message}`);
             }
 
-            const config = await getResponse.json() as AutomationConfig;
-            config.alias = `${config.alias} (Copy)`;
+            // Modify config for duplication
+            const duplicateConfig = {
+              ...result.config,
+              alias: `${result.config.alias} (Copy)`,
+              // Remove ID so a new one gets generated
+              id: undefined
+            };
+
+            // Validate the duplicate config
+            const validation = validateAutomationConfig(duplicateConfig);
+            if (!validation.valid) {
+              throw new Error(`Duplicate configuration validation failed: ${validation.errors.join(', ')}`);
+            }
 
             // Create new automation with modified config
             const createResponse = await fetch(`${HASS_HOST}/api/config/automation/config`, {
@@ -6046,18 +6035,30 @@ automation:
                 Authorization: `Bearer ${HASS_TOKEN}`,
                 'Content-Type': 'application/json',
               },
-              body: JSON.stringify(config),
+              body: JSON.stringify(duplicateConfig),
             });
 
             if (!createResponse.ok) {
-              throw new Error(`Failed to create duplicate automation: ${createResponse.statusText}`);
+              const errorText = await createResponse.text();
+              throw new Error(`Failed to create duplicate automation: ${createResponse.statusText} - ${errorText}`);
             }
 
             const newAutomation = await createResponse.json() as AutomationResponse;
+            
+            // Reload automations if possible
+            if (wsClient) {
+              try {
+                await wsClient.callService('automation', 'reload');
+              } catch (reloadError) {
+                logger.warn(`Automation reload failed but duplication succeeded: ${reloadError}`);
+              }
+            }
+
             return {
               success: true,
               message: `Successfully duplicated automation ${params.automation_id}`,
               new_automation_id: newAutomation.automation_id,
+              source: 'enhanced_duplication_with_validation'
             };
           }
         }
