@@ -44,6 +44,63 @@ export interface AutomationUpdateResult {
 }
 
 /**
+ * Types for automation trace data
+ */
+export interface AutomationTraceStep {
+  path: string;
+  timestamp: string;
+  changed_variables?: Record<string, any>;
+  result?: any;
+  error?: string;
+}
+
+export interface AutomationTrace {
+  run_id: string;
+  automation_id: string;
+  timestamp: string;
+  trigger?: any;
+  variables?: Record<string, any>;
+  condition?: any;
+  action?: any;
+  config: AutomationConfig;
+  context: {
+    id: string;
+    parent_id?: string;
+    user_id?: string;
+  };
+  state: 'running' | 'stopped' | 'debugged';
+  script_execution?: 'finished' | 'cancelled' | 'timeout' | 'failed';
+  trace: Record<string, AutomationTraceStep[]>;
+  last_step?: string;
+  error?: string;
+}
+
+export interface AutomationTraceListItem {
+  run_id: string;
+  timestamp: string;
+  state: 'running' | 'stopped' | 'debugged';
+  script_execution?: 'finished' | 'cancelled' | 'timeout' | 'failed';
+  last_step?: string;
+  error?: string;
+}
+
+export interface AutomationTraceListResult {
+  success: boolean;
+  traces?: AutomationTraceListItem[];
+  message?: string;
+  automation_id?: string;
+  entity_id?: string;
+}
+
+export interface AutomationTraceDetailResult {
+  success: boolean;
+  trace?: AutomationTrace;
+  message?: string;
+  automation_id?: string;
+  entity_id?: string;
+}
+
+/**
  * Resolve automation ID from various input formats
  */
 export function resolveAutomationId(automationInput: string): AutomationIdResolution {
@@ -758,4 +815,307 @@ export async function getAutomationInfo(
     message,
     source
   };
+}
+
+/**
+ * Get list of automation traces for a specific automation
+ * Each automation stores traces of recent executions for debugging purposes
+ */
+export async function getAutomationTraces(
+  automationId: string,
+  hassHost: string,
+  hassToken: string,
+  wsClient?: any
+): Promise<AutomationTraceListResult> {
+  const resolved = resolveAutomationId(automationId);
+  
+  try {
+    // Get the actual internal automation ID first
+    const idLookup = await getActualAutomationId(automationId, hassHost, hassToken);
+    
+    if (!idLookup.success || !idLookup.internal_id) {
+      return {
+        success: false,
+        message: `Cannot retrieve traces: ${idLookup.message}`,
+        automation_id: resolved.numeric_id,
+        entity_id: resolved.entity_id
+      };
+    }
+
+    const actualInternalId = idLookup.internal_id;
+    const actualEntityId = idLookup.entity_id || resolved.entity_id;
+
+    // Try WebSocket API first if available
+    if (wsClient && typeof wsClient.listAutomationTraces === 'function') {
+      try {
+        const wsTraceData = await wsClient.listAutomationTraces(actualInternalId);
+        
+        if (wsTraceData && Array.isArray(wsTraceData)) {
+          const traces: AutomationTraceListItem[] = wsTraceData.map((trace: any) => ({
+            run_id: trace?.run_id || 'unknown',
+            timestamp: trace?.timestamp || new Date().toISOString(),
+            state: trace?.state || 'stopped', 
+            script_execution: trace?.script_execution,
+            last_step: trace?.last_step,
+            error: trace?.error
+          }));
+
+          return {
+            success: true,
+            traces,
+            automation_id: actualInternalId,
+            entity_id: actualEntityId,
+            message: `Retrieved ${traces.length} trace(s) for automation ${actualEntityId} via WebSocket`
+          };
+        }
+      } catch (wsError) {
+        logger.warn(`WebSocket trace retrieval failed: ${wsError}, falling back to alternative methods`);
+      }
+    }
+
+    // Fallback: Try to get trace information from logbook API
+    try {
+      const now = new Date();
+      const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const logbookResponse = await fetch(`${hassHost}/api/logbook/${yesterday.toISOString()}?entity=${actualEntityId}`, {
+        headers: {
+          Authorization: `Bearer ${hassToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (logbookResponse.ok) {
+        const logbookData = await logbookResponse.json();
+        
+        if (Array.isArray(logbookData)) {
+          // Convert logbook entries to trace-like format
+          const traces: AutomationTraceListItem[] = logbookData
+            .filter((entry: any) => entry.entity_id === actualEntityId && entry.domain === 'automation')
+            .slice(0, 5) // Limit to last 5 like trace storage
+            .map((entry: any, index: number) => ({
+              run_id: `logbook-${entry.when}-${index}`,
+              timestamp: entry.when,
+              state: 'stopped', // Logbook entries are historical, so they're stopped
+              script_execution: entry.state === 'off' ? undefined : 'finished',
+              last_step: undefined,
+              error: entry.message?.includes('error') ? entry.message : undefined
+            }));
+
+          return {
+            success: true,
+            traces,
+            automation_id: actualInternalId,
+            entity_id: actualEntityId,
+            message: `Retrieved ${traces.length} trace(s) from logbook for automation ${actualEntityId} (WebSocket traces not available)`
+          };
+        }
+      }
+    } catch (logbookError) {
+      logger.warn(`Logbook fallback failed: ${logbookError}`);
+    }
+
+    // Last resort: Return empty traces with informative message
+    return {
+      success: true,
+      traces: [],
+      automation_id: actualInternalId,
+      entity_id: actualEntityId,
+      message: `No traces available for automation ${actualEntityId}. Trace functionality may require Home Assistant 2021.4+ or may only be available through the UI.`
+    };
+
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred while retrieving traces',
+      automation_id: resolved.numeric_id,
+      entity_id: resolved.entity_id
+    };
+  }
+}
+
+/**
+ * Get detailed trace data for a specific automation execution
+ * This provides step-by-step execution details for debugging
+ */
+export async function getAutomationTraceDetail(
+  automationId: string,
+  runId: string,
+  hassHost: string,
+  hassToken: string,
+  wsClient?: any
+): Promise<AutomationTraceDetailResult> {
+  const resolved = resolveAutomationId(automationId);
+  
+  try {
+    // Get the actual internal automation ID first
+    const idLookup = await getActualAutomationId(automationId, hassHost, hassToken);
+    
+    if (!idLookup.success || !idLookup.internal_id) {
+      return {
+        success: false,
+        message: `Cannot retrieve trace detail: ${idLookup.message}`,
+        automation_id: resolved.numeric_id,
+        entity_id: resolved.entity_id
+      };
+    }
+
+    const actualInternalId = idLookup.internal_id;
+    const actualEntityId = idLookup.entity_id || resolved.entity_id;
+
+    // Try WebSocket API first if available
+    if (wsClient && typeof wsClient.getAutomationTraceDetail === 'function') {
+      try {
+        const wsTraceDetail = await wsClient.getAutomationTraceDetail(actualInternalId, runId);
+        
+        if (wsTraceDetail) {
+          const trace: AutomationTrace = {
+            run_id: wsTraceDetail?.run_id || runId,
+            automation_id: actualInternalId,
+            timestamp: wsTraceDetail?.timestamp || new Date().toISOString(),
+            trigger: wsTraceDetail?.trigger,
+            variables: wsTraceDetail?.variables,
+            condition: wsTraceDetail?.condition,
+            action: wsTraceDetail?.action,
+            config: wsTraceDetail?.config || {},
+            context: wsTraceDetail?.context || { id: 'unknown' },
+            state: wsTraceDetail?.state || 'stopped',
+            script_execution: wsTraceDetail?.script_execution,
+            trace: wsTraceDetail?.trace || {},
+            last_step: wsTraceDetail?.last_step,
+            error: wsTraceDetail?.error
+          };
+
+          return {
+            success: true,
+            trace,
+            automation_id: actualInternalId,
+            entity_id: actualEntityId,
+            message: `Retrieved detailed trace for run ${runId} of automation ${actualEntityId} via WebSocket`
+          };
+        }
+      } catch (wsError) {
+        logger.warn(`WebSocket trace detail retrieval failed: ${wsError}, falling back to alternative methods`);
+      }
+    }
+
+    // Fallback: If this is a logbook-based run_id, try to get more details from logbook
+    if (runId.startsWith('logbook-')) {
+      try {
+        // Extract timestamp from logbook run_id format: logbook-timestamp-index
+        const parts = runId.split('-');
+        if (parts.length >= 2) {
+          const timestamp = parts[1];
+          
+          const logbookResponse = await fetch(`${hassHost}/api/logbook/${timestamp}?entity=${actualEntityId}`, {
+            headers: {
+              Authorization: `Bearer ${hassToken}`,
+              'Content-Type': 'application/json',
+            },
+          });
+
+          if (logbookResponse.ok) {
+            const logbookData = await logbookResponse.json();
+            const entry = Array.isArray(logbookData) ? logbookData[0] : logbookData;
+            
+            if (entry) {
+              // Create a basic trace from logbook data
+              const trace: AutomationTrace = {
+                run_id: runId,
+                automation_id: actualInternalId,
+                timestamp: entry.when || timestamp,
+                trigger: { platform: 'unknown', description: 'Trace data reconstructed from logbook' },
+                variables: {},
+                config: {
+                  alias: entry.name || actualEntityId,
+                  trigger: [],
+                  action: []
+                },
+                context: { id: entry.context_id || 'unknown' },
+                state: 'stopped',
+                script_execution: entry.state === 'off' ? undefined : 'finished',
+                trace: {
+                  'logbook_entry': [{
+                    path: 'logbook_entry',
+                    timestamp: entry.when || timestamp,
+                    result: {
+                      message: entry.message,
+                      state: entry.state,
+                      entity_id: entry.entity_id
+                    }
+                  }]
+                },
+                last_step: 'logbook_entry',
+                error: entry.message?.includes('error') ? entry.message : undefined
+              };
+
+              return {
+                success: true,
+                trace,
+                automation_id: actualInternalId,
+                entity_id: actualEntityId,
+                message: `Retrieved trace detail from logbook for run ${runId} (full trace data not available)`
+              };
+            }
+          }
+        }
+      } catch (logbookError) {
+        logger.warn(`Logbook trace detail fallback failed: ${logbookError}`);
+      }
+    }
+
+    return {
+      success: false,
+      message: `Trace detail not available for run ${runId}. This may be because the trace has expired, the run ID is invalid, or trace functionality is not supported by your Home Assistant version.`,
+      automation_id: actualInternalId,
+      entity_id: actualEntityId
+    };
+
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred while retrieving trace detail',
+      automation_id: resolved.numeric_id,
+      entity_id: resolved.entity_id
+    };
+  }
+}
+
+/**
+ * Get the most recent trace for an automation
+ * Convenience function to get the latest execution trace
+ */
+export async function getAutomationLatestTrace(
+  automationId: string,
+  hassHost: string,
+  hassToken: string,
+  wsClient?: any
+): Promise<AutomationTraceDetailResult> {
+  try {
+    // First get the list of traces
+    const tracesList = await getAutomationTraces(automationId, hassHost, hassToken, wsClient);
+    
+    if (!tracesList.success || !tracesList.traces || tracesList.traces.length === 0) {
+      return {
+        success: false,
+        message: tracesList.message || 'No traces found for this automation',
+        automation_id: tracesList.automation_id,
+        entity_id: tracesList.entity_id
+      };
+    }
+
+    // Get the most recent trace (first in the list, assuming they're sorted by timestamp desc)
+    const latestTrace = tracesList.traces[0];
+    
+    // Get the detailed trace data
+    return await getAutomationTraceDetail(automationId, latestTrace.run_id, hassHost, hassToken, wsClient);
+    
+  } catch (error) {
+    const resolved = resolveAutomationId(automationId);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred while retrieving latest trace',
+      automation_id: resolved.numeric_id,
+      entity_id: resolved.entity_id
+    };
+  }
 }

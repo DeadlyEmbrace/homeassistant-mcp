@@ -229,6 +229,31 @@ export class HassWebSocketClient extends EventEmitter {
         return this.callWS(message);
     }
 
+    public async getAutomationTrace(entityId: string): Promise<any> {
+        return this.callWS({
+            type: 'trace/get',
+            domain: 'automation', 
+            item_id: entityId
+        });
+    }
+
+    public async getAutomationTraceDetail(entityId: string, runId: string): Promise<any> {
+        return this.callWS({
+            type: 'trace/get',
+            domain: 'automation',
+            item_id: entityId,
+            run_id: runId
+        });
+    }
+
+    public async listAutomationTraces(entityId: string): Promise<any> {
+        return this.callWS({
+            type: 'trace/list',
+            domain: 'automation',
+            item_id: entityId
+        });
+    }
+
     private send(message: any): void {
         if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(message));

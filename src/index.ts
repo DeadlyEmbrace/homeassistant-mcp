@@ -23,6 +23,9 @@ import {
   getAutomationInfo,
   resolveAutomationId,
   getActualAutomationId,
+  getAutomationTraces,
+  getAutomationTraceDetail,
+  getAutomationLatestTrace,
   type AutomationConfig as AutomationConfigType,
   type AutomationUpdateResult 
 } from './utils/automation-helpers.js';
@@ -673,7 +676,7 @@ interface NotifyParams {
 }
 
 interface AutomationParams {
-  action: 'list' | 'toggle' | 'trigger' | 'get_yaml' | 'create' | 'validate' | 'update';
+  action: 'list' | 'toggle' | 'trigger' | 'get_yaml' | 'create' | 'validate' | 'update' | 'get_traces' | 'get_trace_detail' | 'get_latest_trace';
   automation_id?: string;
   // Fields for automation creation
   alias?: string;
@@ -695,6 +698,8 @@ interface AutomationParams {
   validate_trigger?: any;
   validate_condition?: any;
   validate_action?: any;
+  // Trace-specific fields
+  run_id?: string;
 }
 
 interface AddonParams {
@@ -4368,7 +4373,7 @@ async function main() {
     name: 'automation',
     description: 'Manage Home Assistant automations with enhanced reliability - features robust ID handling (supports both automation.entity_id and numeric ID formats), configuration validation, update verification, comprehensive error reporting, and automatic retry logic for improved success rates',
     parameters: z.object({
-      action: z.enum(['list', 'toggle', 'trigger', 'get_yaml', 'create', 'validate', 'update']).describe('Action to perform with automation'),
+      action: z.enum(['list', 'toggle', 'trigger', 'get_yaml', 'create', 'validate', 'update', 'get_traces', 'get_trace_detail', 'get_latest_trace']).describe('Action to perform with automation'),
       automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_yaml, and update actions). Supports multiple formats: full entity ID (automation.my_automation), numeric ID (1718469913974), or entity name (my_automation). The system will automatically try all formats for maximum compatibility.'),
       // Fields for automation creation
       alias: z.string().optional().describe('Automation name/alias (required for create action)'),
@@ -4390,6 +4395,8 @@ async function main() {
       validate_trigger: z.any().optional().describe('Trigger configuration to validate'),
       validate_condition: z.any().optional().describe('Condition configuration to validate'),
       validate_action: z.any().optional().describe('Action configuration to validate'),
+      // Trace-specific fields
+      run_id: z.string().optional().describe('Specific trace run ID (required for get_trace_detail action)'),
     }),
     execute: async (params: AutomationParams) => {
       try {
@@ -4852,6 +4859,67 @@ automation:
           return {
             ...result,
             source: 'enhanced_update_with_verification'
+          };
+        } else if (params.action === 'get_traces') {
+          if (!params.automation_id) {
+            throw new Error('Automation ID is required for get_traces action');
+          }
+
+          const tracesResult = await getAutomationTraces(
+            params.automation_id,
+            HASS_HOST!,
+            HASS_TOKEN!,
+            wsClient
+          );
+
+          return {
+            success: tracesResult.success,
+            message: tracesResult.message,
+            traces: tracesResult.traces || [],
+            automation_id: tracesResult.automation_id,
+            entity_id: tracesResult.entity_id,
+            source: 'automation_trace_api'
+          };
+        } else if (params.action === 'get_trace_detail') {
+          if (!params.automation_id || !params.run_id) {
+            throw new Error('Automation ID and run_id are required for get_trace_detail action');
+          }
+
+          const traceDetailResult = await getAutomationTraceDetail(
+            params.automation_id,
+            params.run_id!,
+            HASS_HOST!,
+            HASS_TOKEN!,
+            wsClient
+          );
+
+          return {
+            success: traceDetailResult.success,
+            message: traceDetailResult.message,
+            trace: traceDetailResult.trace,
+            automation_id: traceDetailResult.automation_id,
+            entity_id: traceDetailResult.entity_id,
+            source: 'automation_trace_detail_api'
+          };
+        } else if (params.action === 'get_latest_trace') {
+          if (!params.automation_id) {
+            throw new Error('Automation ID is required for get_latest_trace action');
+          }
+
+          const latestTraceResult = await getAutomationLatestTrace(
+            params.automation_id,
+            HASS_HOST!,
+            HASS_TOKEN!,
+            wsClient
+          );
+
+          return {
+            success: latestTraceResult.success,
+            message: latestTraceResult.message,
+            trace: latestTraceResult.trace,
+            automation_id: latestTraceResult.automation_id,
+            entity_id: latestTraceResult.entity_id,
+            source: 'automation_latest_trace_api'
           };
         } else {
           if (!params.automation_id) {
