@@ -26,8 +26,11 @@ import {
   getAutomationTraces,
   getAutomationTraceDetail,
   getAutomationLatestTrace,
+  getAutomationErrorTraces,
+  getFilteredAutomationTraces,
   type AutomationConfig as AutomationConfigType,
-  type AutomationUpdateResult 
+  type AutomationUpdateResult,
+  type AutomationTraceFilter 
 } from './utils/automation-helpers.js';
 
 import { get_hass } from './hass/index.js';
@@ -676,7 +679,7 @@ interface NotifyParams {
 }
 
 interface AutomationParams {
-  action: 'list' | 'toggle' | 'trigger' | 'get_yaml' | 'create' | 'validate' | 'update' | 'get_traces' | 'get_trace_detail' | 'get_latest_trace';
+  action: 'list' | 'toggle' | 'trigger' | 'get_yaml' | 'create' | 'validate' | 'update' | 'get_traces' | 'get_trace_detail' | 'get_latest_trace' | 'get_error_traces' | 'get_filtered_traces';
   automation_id?: string;
   // Fields for automation creation
   alias?: string;
@@ -700,6 +703,12 @@ interface AutomationParams {
   validate_action?: any;
   // Trace-specific fields
   run_id?: string;
+  // Trace filtering fields
+  filter_has_error?: boolean;
+  filter_script_execution?: 'finished' | 'cancelled' | 'timeout' | 'failed';
+  filter_state?: 'running' | 'stopped' | 'debugged';
+  filter_since?: string;
+  filter_limit?: number;
 }
 
 interface AddonParams {
@@ -4373,7 +4382,7 @@ async function main() {
     name: 'automation',
     description: 'Manage Home Assistant automations with enhanced reliability - features robust ID handling (supports both automation.entity_id and numeric ID formats), configuration validation, update verification, comprehensive error reporting, and automatic retry logic for improved success rates',
     parameters: z.object({
-      action: z.enum(['list', 'toggle', 'trigger', 'get_yaml', 'create', 'validate', 'update', 'get_traces', 'get_trace_detail', 'get_latest_trace']).describe('Action to perform with automation'),
+      action: z.enum(['list', 'toggle', 'trigger', 'get_yaml', 'create', 'validate', 'update', 'get_traces', 'get_trace_detail', 'get_latest_trace', 'get_error_traces', 'get_filtered_traces']).describe('Action to perform with automation'),
       automation_id: z.string().optional().describe('Automation ID (required for toggle, trigger, get_yaml, and update actions). Supports multiple formats: full entity ID (automation.my_automation), numeric ID (1718469913974), or entity name (my_automation). The system will automatically try all formats for maximum compatibility.'),
       // Fields for automation creation
       alias: z.string().optional().describe('Automation name/alias (required for create action)'),
@@ -4397,6 +4406,12 @@ async function main() {
       validate_action: z.any().optional().describe('Action configuration to validate'),
       // Trace-specific fields
       run_id: z.string().optional().describe('Specific trace run ID (required for get_trace_detail action)'),
+      // Trace filtering fields
+      filter_has_error: z.boolean().optional().describe('Filter traces by error presence (for get_filtered_traces action)'),
+      filter_script_execution: z.enum(['finished', 'cancelled', 'timeout', 'failed']).optional().describe('Filter traces by script execution status'),
+      filter_state: z.enum(['running', 'stopped', 'debugged']).optional().describe('Filter traces by execution state'),
+      filter_since: z.string().optional().describe('Filter traces since this ISO timestamp'),
+      filter_limit: z.number().optional().describe('Limit number of traces returned'),
     }),
     execute: async (params: AutomationParams) => {
       try {
@@ -4920,6 +4935,66 @@ automation:
             automation_id: latestTraceResult.automation_id,
             entity_id: latestTraceResult.entity_id,
             source: 'automation_latest_trace_api'
+          };
+        } else if (params.action === 'get_error_traces') {
+          if (!params.automation_id) {
+            throw new Error('Automation ID is required for get_error_traces action');
+          }
+
+          // Build filter from parameters
+          const filter: AutomationTraceFilter = {};
+          if (params.filter_script_execution) filter.script_execution = params.filter_script_execution;
+          if (params.filter_state) filter.state = params.filter_state;
+          if (params.filter_since) filter.since = params.filter_since;
+          if (params.filter_limit) filter.limit = params.filter_limit;
+
+          const errorTracesResult = await getAutomationErrorTraces(
+            params.automation_id,
+            HASS_HOST!,
+            HASS_TOKEN!,
+            wsClient,
+            filter
+          );
+
+          return {
+            success: errorTracesResult.success,
+            message: errorTracesResult.message,
+            error_traces: errorTracesResult.error_traces || [],
+            automation_id: errorTracesResult.automation_id,
+            entity_id: errorTracesResult.entity_id,
+            total_traces: errorTracesResult.total_traces,
+            error_count: errorTracesResult.error_count,
+            source: 'automation_error_traces_api'
+          };
+        } else if (params.action === 'get_filtered_traces') {
+          if (!params.automation_id) {
+            throw new Error('Automation ID is required for get_filtered_traces action');
+          }
+
+          // Build filter from parameters
+          const filter: AutomationTraceFilter = {};
+          if (params.filter_has_error !== undefined) filter.has_error = params.filter_has_error;
+          if (params.filter_script_execution) filter.script_execution = params.filter_script_execution;
+          if (params.filter_state) filter.state = params.filter_state;
+          if (params.filter_since) filter.since = params.filter_since;
+          if (params.filter_limit) filter.limit = params.filter_limit;
+
+          const filteredTracesResult = await getFilteredAutomationTraces(
+            params.automation_id,
+            filter,
+            HASS_HOST!,
+            HASS_TOKEN!,
+            wsClient
+          );
+
+          return {
+            success: filteredTracesResult.success,
+            message: filteredTracesResult.message,
+            traces: filteredTracesResult.traces || [],
+            automation_id: filteredTracesResult.automation_id,
+            entity_id: filteredTracesResult.entity_id,
+            filter_applied: filter,
+            source: 'automation_filtered_traces_api'
           };
         } else {
           if (!params.automation_id) {

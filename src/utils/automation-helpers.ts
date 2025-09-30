@@ -100,6 +100,24 @@ export interface AutomationTraceDetailResult {
   entity_id?: string;
 }
 
+export interface AutomationTraceFilter {
+  has_error?: boolean;
+  script_execution?: 'finished' | 'cancelled' | 'timeout' | 'failed';
+  state?: 'running' | 'stopped' | 'debugged';
+  since?: string; // ISO timestamp
+  limit?: number;
+}
+
+export interface AutomationErrorTraceResult {
+  success: boolean;
+  error_traces?: AutomationTraceListItem[];
+  message?: string;
+  automation_id?: string;
+  entity_id?: string;
+  total_traces?: number;
+  error_count?: number;
+}
+
 /**
  * Resolve automation ID from various input formats
  */
@@ -1114,6 +1132,161 @@ export async function getAutomationLatestTrace(
     return {
       success: false,
       message: error instanceof Error ? error.message : 'Unknown error occurred while retrieving latest trace',
+      automation_id: resolved.numeric_id,
+      entity_id: resolved.entity_id
+    };
+  }
+}
+
+/**
+ * Get automation traces that encountered errors during execution
+ * Useful for debugging failed automations and identifying patterns
+ */
+export async function getAutomationErrorTraces(
+  automationId: string,
+  hassHost: string,
+  hassToken: string,
+  wsClient?: any,
+  filter?: AutomationTraceFilter
+): Promise<AutomationErrorTraceResult> {
+  try {
+    // Get all traces first
+    const allTraces = await getAutomationTraces(automationId, hassHost, hassToken, wsClient);
+    
+    if (!allTraces.success || !allTraces.traces) {
+      return {
+        success: false,
+        message: allTraces.message || 'Failed to retrieve traces',
+        automation_id: allTraces.automation_id,
+        entity_id: allTraces.entity_id,
+        total_traces: 0,
+        error_count: 0
+      };
+    }
+
+    // Filter traces for errors
+    const errorTraces = allTraces.traces.filter(trace => {
+      // Check for explicit error field
+      if (trace.error) return true;
+      
+      // Check for failed script execution
+      if (trace.script_execution === 'failed' || 
+          trace.script_execution === 'cancelled' || 
+          trace.script_execution === 'timeout') {
+        return true;
+      }
+      
+      // Apply additional filters if provided
+      if (filter) {
+        if (filter.script_execution && trace.script_execution !== filter.script_execution) {
+          return false;
+        }
+        if (filter.state && trace.state !== filter.state) {
+          return false;
+        }
+        if (filter.since && new Date(trace.timestamp) < new Date(filter.since)) {
+          return false;
+        }
+      }
+      
+      return false;
+    });
+
+    // Apply limit if specified
+    const limitedErrorTraces = filter?.limit ? errorTraces.slice(0, filter.limit) : errorTraces;
+
+    return {
+      success: true,
+      error_traces: limitedErrorTraces,
+      message: `Found ${limitedErrorTraces.length} error trace(s) out of ${allTraces.traces.length} total traces for automation ${allTraces.entity_id}`,
+      automation_id: allTraces.automation_id,
+      entity_id: allTraces.entity_id,
+      total_traces: allTraces.traces.length,
+      error_count: limitedErrorTraces.length
+    };
+
+  } catch (error) {
+    const resolved = resolveAutomationId(automationId);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred while retrieving error traces',
+      automation_id: resolved.numeric_id,
+      entity_id: resolved.entity_id,
+      total_traces: 0,
+      error_count: 0
+    };
+  }
+}
+
+/**
+ * Get filtered automation traces based on execution status and other criteria
+ * Allows filtering by success/failure, execution state, time range, etc.
+ */
+export async function getFilteredAutomationTraces(
+  automationId: string,
+  filter: AutomationTraceFilter,
+  hassHost: string,
+  hassToken: string,
+  wsClient?: any
+): Promise<AutomationTraceListResult> {
+  try {
+    // Get all traces first
+    const allTraces = await getAutomationTraces(automationId, hassHost, hassToken, wsClient);
+    
+    if (!allTraces.success || !allTraces.traces) {
+      return allTraces;
+    }
+
+    // Apply filters
+    let filteredTraces = allTraces.traces.filter(trace => {
+      // Filter by error presence
+      if (filter.has_error !== undefined) {
+        const hasError = !!(trace.error || 
+          trace.script_execution === 'failed' || 
+          trace.script_execution === 'cancelled' || 
+          trace.script_execution === 'timeout');
+        
+        if (filter.has_error !== hasError) {
+          return false;
+        }
+      }
+      
+      // Filter by script execution status
+      if (filter.script_execution && trace.script_execution !== filter.script_execution) {
+        return false;
+      }
+      
+      // Filter by state
+      if (filter.state && trace.state !== filter.state) {
+        return false;
+      }
+      
+      // Filter by timestamp
+      if (filter.since && new Date(trace.timestamp) < new Date(filter.since)) {
+        return false;
+      }
+      
+      return true;
+    });
+
+    // Apply limit
+    if (filter.limit && filter.limit > 0) {
+      filteredTraces = filteredTraces.slice(0, filter.limit);
+    }
+
+    return {
+      success: true,
+      traces: filteredTraces,
+      message: `Retrieved ${filteredTraces.length} filtered trace(s) out of ${allTraces.traces.length} total traces for automation ${allTraces.entity_id}`,
+      automation_id: allTraces.automation_id,
+      entity_id: allTraces.entity_id
+    };
+
+  } catch (error) {
+    const resolved = resolveAutomationId(automationId);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error occurred while filtering traces',
       automation_id: resolved.numeric_id,
       entity_id: resolved.entity_id
     };
