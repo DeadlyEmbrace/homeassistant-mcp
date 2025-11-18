@@ -4966,6 +4966,90 @@ async function main() {
   registerTool(controlTool);
   tools.push(controlTool);
 
+  // Add generic service call tool for arbitrary Home Assistant services
+  const callServiceTool = {
+    name: 'call_service',
+    description: 'Call any Home Assistant service with custom parameters. Use for advanced operations like creating groups, executing scripts, or calling custom services.',
+    parameters: z.object({
+      domain: z.string().describe('Service domain (e.g., "group", "script", "notify", "automation")'),
+      service: z.string().describe('Service name (e.g., "set", "turn_on", "reload")'),
+      target: z.object({
+        entity_id: z.union([z.string(), z.array(z.string())]).optional()
+          .describe('Target entity ID(s)'),
+        device_id: z.union([z.string(), z.array(z.string())]).optional()
+          .describe('Target device ID(s)'),
+        area_id: z.union([z.string(), z.array(z.string())]).optional()
+          .describe('Target area ID(s)'),
+      }).optional().describe('Target entities, devices, or areas'),
+      service_data: z.record(z.any()).optional()
+        .describe('Service-specific data/parameters as key-value pairs'),
+      return_response: z.boolean().default(false).optional()
+        .describe('Whether to return response data from the service call'),
+    }),
+    execute: async (params: {
+      domain: string;
+      service: string;
+      target?: {
+        entity_id?: string | string[];
+        device_id?: string | string[];
+        area_id?: string | string[];
+      };
+      service_data?: Record<string, any>;
+      return_response?: boolean;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        // Build service call payload
+        const payload: any = {
+          type: 'call_service',
+          domain: params.domain,
+          service: params.service,
+        };
+
+        // Add target if provided
+        if (params.target) {
+          payload.target = params.target;
+        }
+
+        // Add service data if provided
+        if (params.service_data) {
+          payload.service_data = params.service_data;
+        }
+
+        // Add return_response flag
+        if (params.return_response) {
+          payload.return_response = true;
+        }
+
+        // Call the service via WebSocket
+        const result = await wsClient.callWS(payload);
+
+        return {
+          success: true,
+          message: `Successfully called ${params.domain}.${params.service}`,
+          domain: params.domain,
+          service: params.service,
+          target: params.target,
+          service_data: params.service_data,
+          response: params.return_response ? result : undefined,
+        };
+
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+          domain: params.domain,
+          service: params.service,
+          error_details: error instanceof Error ? error.stack : undefined,
+        };
+      }
+    }
+  };
+  registerTool(callServiceTool);
+
   // Add the history tool
   const historyTool = {
     name: 'get_history',
