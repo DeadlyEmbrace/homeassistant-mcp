@@ -1083,26 +1083,32 @@ async function main() {
   // Add the enhanced device search tool with area support
   const searchDevicesTool = {
     name: 'search_devices',
-    description: 'Search for Home Assistant devices by name, domain, entity ID pattern, state, area, or attributes',
+    description: 'Search for Home Assistant devices by name, domain, entity ID pattern, state, area, labels, or attributes. Supports combined filtering.',
     parameters: z.object({
       query: z.string().optional().describe('Search query - matches against entity ID, friendly name, or domain'),
       domain: z.string().optional().describe('Filter by specific domain (e.g., "light", "switch", "sensor")'),
       state: z.string().optional().describe('Filter by current state (e.g., "on", "off", "unavailable")'),
       area: z.string().optional().describe('Filter by area name or area_id (e.g., "Living Room", "living_room")'),
+      labels: z.array(z.string()).optional().describe('Filter by labels - device must have at least one of these labels'),
       device_class: z.string().optional().describe('Filter by device class (e.g., "motion", "temperature", "humidity")'),
       limit: z.number().min(1).max(500).default(50).optional().describe('Maximum number of results to return'),
+      offset: z.number().min(0).default(0).optional().describe('Number of results to skip (for pagination)'),
       include_attributes: z.boolean().default(false).optional().describe('Include full attributes in response'),
       include_area_info: z.boolean().default(true).optional().describe('Include area information for each device'),
+      include_label_info: z.boolean().default(true).optional().describe('Include label information for each device'),
     }),
     execute: async (params: {
       query?: string;
       domain?: string;
       state?: string;
       area?: string;
+      labels?: string[];
       device_class?: string;
       limit?: number;
+      offset?: number;
       include_attributes?: boolean;
       include_area_info?: boolean;
+      include_label_info?: boolean;
     }) => {
       try {
         if (!wsClient) {
@@ -1110,12 +1116,20 @@ async function main() {
         }
 
         // Get all necessary data via WebSocket
-        const [states, entities, devices, areas] = await Promise.all([
+        const promises: Promise<any>[] = [
           wsClient.callWS({ type: 'get_states' }),
           wsClient.callWS({ type: 'config/entity_registry/list' }),
           wsClient.callWS({ type: 'config/device_registry/list' }),
           wsClient.callWS({ type: 'config/area_registry/list' })
-        ]);
+        ];
+
+        // Add labels if needed
+        if (params.labels && params.labels.length > 0) {
+          promises.push(wsClient.callWS({ type: 'config/label_registry/list' }));
+        }
+
+        const results = await Promise.all(promises);
+        const [states, entities, devices, areas, allLabels] = results;
 
         if (!Array.isArray(states) || !Array.isArray(entities) || !Array.isArray(devices) || !Array.isArray(areas)) {
           throw new Error('Invalid response from Home Assistant WebSocket API');
@@ -1124,6 +1138,23 @@ async function main() {
         // Create area lookup maps
         const areaMap = new Map(areas.map((area: any) => [area.area_id, area]));
         const entityAreaMap = new Map();
+        const deviceMap = new Map(devices.map((device: any) => [device.id, device]));
+        
+        // Create label maps if labels filter is used
+        let labelMap = new Map();
+        let labelNameToIdMap = new Map();
+        let entityLabelsMap = new Map();
+        
+        if (params.labels && params.labels.length > 0 && allLabels) {
+          labelMap = new Map(allLabels.map((label: any) => [label.label_id, label]));
+          labelNameToIdMap = new Map(allLabels.map((label: any) => [label.name.toLowerCase(), label.label_id]));
+        } else if (params.include_label_info !== false) {
+          // Get labels for display even if not filtering
+          const labelsData = await wsClient.callWS({ type: 'config/label_registry/list' });
+          if (Array.isArray(labelsData)) {
+            labelMap = new Map(labelsData.map((label: any) => [label.label_id, label]));
+          }
+        }
         
         // Map entities to their areas (direct and via devices)
         entities.forEach((entity: any) => {
@@ -1131,10 +1162,25 @@ async function main() {
             entityAreaMap.set(entity.entity_id, entity.area_id);
           } else if (entity.device_id) {
             // Find device and get its area
-            const device = devices.find((d: any) => d.id === entity.device_id);
+            const device = deviceMap.get(entity.device_id);
             if (device?.area_id) {
               entityAreaMap.set(entity.entity_id, device.area_id);
             }
+          }
+
+          // Map labels (from entity or device)
+          if (params.labels || params.include_label_info !== false) {
+            const entityLabelSet = new Set<string>();
+            if (entity.labels && Array.isArray(entity.labels)) {
+              entity.labels.forEach((lbl: string) => entityLabelSet.add(lbl));
+            }
+            if (entity.device_id) {
+              const device = deviceMap.get(entity.device_id);
+              if (device?.labels && Array.isArray(device.labels)) {
+                device.labels.forEach((lbl: string) => entityLabelSet.add(lbl));
+              }
+            }
+            entityLabelsMap.set(entity.entity_id, Array.from(entityLabelSet));
           }
         });
 
@@ -1159,6 +1205,26 @@ async function main() {
           filteredDevices = filteredDevices.filter((device: any) => 
             device.attributes?.device_class === params.device_class
           );
+        }
+
+        // Apply labels filter (OR logic - device must have at least one of the labels)
+        if (params.labels && params.labels.length > 0) {
+          const targetLabelIds = params.labels.map(label => {
+            const labelLower = label.toLowerCase();
+            if (labelMap.has(label)) return label;
+            if (labelNameToIdMap.has(labelLower)) return labelNameToIdMap.get(labelLower);
+            for (const [name, id] of labelNameToIdMap.entries()) {
+              if (name.includes(labelLower) || labelLower.includes(name)) {
+                return id;
+              }
+            }
+            return label;
+          }).filter(id => labelMap.has(id!));
+
+          filteredDevices = filteredDevices.filter((device: any) => {
+            const deviceLabels = entityLabelsMap.get(device.entity_id) || [];
+            return targetLabelIds.some(labelId => deviceLabels.includes(labelId));
+          });
         }
 
         // Apply area filter (enhanced with WebSocket data)
@@ -1200,14 +1266,19 @@ async function main() {
           });
         }
 
-        // Apply limit
+        // Calculate total before pagination
+        const totalFound = filteredDevices.length;
+
+        // Apply pagination
+        const offset = params.offset || 0;
         const limit = params.limit || 50;
-        const limitedDevices = filteredDevices.slice(0, limit);
+        const paginatedDevices = filteredDevices.slice(offset, offset + limit);
 
         // Format response
-        const results = limitedDevices.map((device: any) => {
+        const deviceResults = paginatedDevices.map((device: any) => {
           const entityAreaId = entityAreaMap.get(device.entity_id);
           const area = entityAreaId ? areaMap.get(entityAreaId) : null;
+          const deviceLabels = entityLabelsMap.get(device.entity_id) || [];
           
           const baseInfo: any = {
             entity_id: device.entity_id,
@@ -1229,6 +1300,12 @@ async function main() {
             };
           }
 
+          // Add label information if requested
+          if (params.include_label_info !== false && labelMap.size > 0) {
+            baseInfo.labels = deviceLabels;
+            baseInfo.label_names = deviceLabels.map((lbl: string) => labelMap.get(lbl)?.name).filter(Boolean);
+          }
+
           if (params.include_attributes) {
             baseInfo.attributes = device.attributes;
           }
@@ -1240,7 +1317,7 @@ async function main() {
         const resultsByArea: Record<string, any[]> = {};
         const noAreaResults: any[] = [];
         
-        results.forEach((result: any) => {
+        deviceResults.forEach((result: any) => {
           if (result.area) {
             const areaName = result.area.name;
             if (!resultsByArea[areaName]) {
@@ -1254,9 +1331,12 @@ async function main() {
 
         return {
           success: true,
-          total_found: filteredDevices.length,
-          returned: results.length,
-          devices: results,
+          total_found: totalFound,
+          returned: deviceResults.length,
+          offset: offset,
+          limit: limit,
+          has_more: totalFound > (offset + limit),
+          devices: deviceResults,
           devices_by_area: Object.keys(resultsByArea).length > 0 ? resultsByArea : undefined,
           devices_without_area: noAreaResults.length > 0 ? noAreaResults : undefined,
           filters_applied: {
@@ -1264,9 +1344,12 @@ async function main() {
             domain: params.domain,
             state: params.state,
             area: params.area,
+            labels: params.labels,
             device_class: params.device_class,
             limit: limit,
+            offset: offset,
             include_area_info: params.include_area_info ?? true,
+            include_label_info: params.include_label_info ?? true,
           },
           search_method: 'websocket_with_area_registry',
         };
@@ -1280,10 +1363,10 @@ async function main() {
   };
   registerTool(searchDevicesTool);
 
-  // Add comprehensive area-based device discovery tool
+  // Add comprehensive area-based device discovery tool  
   const searchDevicesByAreaTool = {
     name: 'search_devices_by_area',
-    description: 'Advanced search for devices across multiple areas with comprehensive filtering and organization',
+    description: 'Advanced search for devices across multiple areas with comprehensive filtering and organization. Returns ALL devices in matched areas (no artificial limits).',
     parameters: z.object({
       areas: z.array(z.string()).optional().describe('Array of area names or IDs to search in (if empty, searches all areas)'),
       query: z.string().optional().describe('Text search query for device names, entity IDs, or attributes'),
@@ -1293,7 +1376,7 @@ async function main() {
       include_unavailable: z.boolean().default(false).optional().describe('Include devices with unavailable state'),
       group_by: z.enum(['area', 'domain', 'floor', 'none']).default('area').optional().describe('How to group the results'),
       sort_by: z.enum(['name', 'area', 'domain', 'state', 'last_changed']).default('area').optional().describe('Sort results by field'),
-      limit_per_area: z.number().min(1).max(100).default(50).optional().describe('Maximum devices per area'),
+      limit: z.number().min(1).max(10000).default(10000).optional().describe('Maximum total devices to return (default 10000, effectively no limit)'),
       include_area_summary: z.boolean().default(true).optional().describe('Include area summary statistics'),
     }),
     execute: async (params: {
@@ -1305,7 +1388,7 @@ async function main() {
       include_unavailable?: boolean;
       group_by?: 'area' | 'domain' | 'floor' | 'none';
       sort_by?: 'name' | 'area' | 'domain' | 'state' | 'last_changed';
-      limit_per_area?: number;
+      limit?: number;
       include_area_summary?: boolean;
     }) => {
       try {
@@ -1437,10 +1520,8 @@ async function main() {
           };
 
           if (area && devicesByArea[area.area_id] !== undefined) {
-            // Apply per-area limit
-            if (devicesByArea[area.area_id].length < (params.limit_per_area || 50)) {
-              devicesByArea[area.area_id].push(deviceInfo);
-            }
+            // Add all devices (no per-area limit by default - limit applies to total)
+            devicesByArea[area.area_id].push(deviceInfo);
             
             // Update stats
             areaStats[area.area_id].total_devices++;
@@ -1478,7 +1559,12 @@ async function main() {
 
         // Organize results based on grouping preference
         let organizedResults: any;
-        const allDevices = Object.values(devicesByArea).flat().concat(devicesWithoutArea);
+        let allDevices = Object.values(devicesByArea).flat().concat(devicesWithoutArea);
+        
+        // Apply global limit
+        const limit = params.limit || 10000;
+        const totalBeforeLimit = allDevices.length;
+        allDevices = allDevices.slice(0, limit);
         
         switch (params.group_by) {
           case 'domain':
@@ -1515,6 +1601,8 @@ async function main() {
           success: true,
           total_areas_searched: targetAreas.length,
           total_devices_found: allDevices.length,
+          total_available: totalBeforeLimit,
+          truncated: totalBeforeLimit > allDevices.length,
           ...organizedResults,
           area_statistics: params.include_area_summary ? areaStats : undefined,
           filters_applied: {
@@ -1526,7 +1614,7 @@ async function main() {
             include_unavailable: params.include_unavailable ?? false,
             group_by: params.group_by || 'area',
             sort_by: params.sort_by || 'area',
-            limit_per_area: params.limit_per_area || 50,
+            limit: limit,
           },
           search_method: 'comprehensive_area_websocket',
         };
@@ -2334,6 +2422,267 @@ async function main() {
     }
   };
   registerTool(removeDeviceLabelsTool);
+
+  // CRITICAL ISSUE #1 FIX: Search devices by label functionality
+  const searchDevicesByLabelTool = {
+    name: 'search_devices_by_label',
+    description: 'Search and filter devices by labels (organizational tags). Replicates the Home Assistant UI label filter functionality.',
+    parameters: z.object({
+      labels: z.array(z.string()).describe('Array of label names or IDs to filter by (AND/OR logic controlled by match_all parameter)'),
+      match_all: z.boolean().default(false).optional()
+        .describe('If true, device must have ALL labels (AND logic). If false, device can have ANY label (OR logic)'),
+      include_unlabeled: z.boolean().default(false).optional()
+        .describe('Include devices without any labels'),
+      domain: z.string().optional()
+        .describe('Filter by domain (e.g., "light", "sensor", "switch")'),
+      device_class: z.string().optional()
+        .describe('Filter by device class (e.g., "temperature", "motion", "humidity")'),
+      area: z.string().optional()
+        .describe('Filter by area name or area_id (combines label and area filtering)'),
+      state: z.string().optional()
+        .describe('Filter by current state (e.g., "on", "off", "unavailable")'),
+      include_area_info: z.boolean().default(true).optional()
+        .describe('Include area information for each device'),
+      include_attributes: z.boolean().default(false).optional()
+        .describe('Include full attributes in response'),
+      limit: z.number().min(1).max(500).default(100).optional()
+        .describe('Maximum number of results to return'),
+      offset: z.number().min(0).default(0).optional()
+        .describe('Number of results to skip (for pagination)'),
+    }),
+    execute: async (params: {
+      labels: string[];
+      match_all?: boolean;
+      include_unlabeled?: boolean;
+      domain?: string;
+      device_class?: string;
+      area?: string;
+      state?: string;
+      include_area_info?: boolean;
+      include_attributes?: boolean;
+      limit?: number;
+      offset?: number;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        if (!params.labels || params.labels.length === 0) {
+          throw new Error('At least one label must be provided');
+        }
+
+        // Get all necessary data via WebSocket
+        const [states, entities, devices, areas, allLabels] = await Promise.all([
+          wsClient.callWS({ type: 'get_states' }),
+          wsClient.callWS({ type: 'config/entity_registry/list' }),
+          wsClient.callWS({ type: 'config/device_registry/list' }),
+          wsClient.callWS({ type: 'config/area_registry/list' }),
+          wsClient.callWS({ type: 'config/label_registry/list' })
+        ]);
+
+        if (!Array.isArray(states) || !Array.isArray(entities) || 
+            !Array.isArray(devices) || !Array.isArray(areas) || !Array.isArray(allLabels)) {
+          throw new Error('Invalid response from Home Assistant WebSocket API');
+        }
+
+        // Create lookup maps
+        const areaMap = new Map(areas.map((area: any) => [area.area_id, area]));
+        const labelMap = new Map(allLabels.map((label: any) => [label.label_id, label]));
+        const labelNameToIdMap = new Map(allLabels.map((label: any) => [label.name.toLowerCase(), label.label_id]));
+        const entityAreaMap = new Map();
+        const entityLabelsMap = new Map();
+        const deviceMap = new Map(devices.map((device: any) => [device.id, device]));
+
+        // Resolve label names to IDs
+        const targetLabelIds = params.labels.map(label => {
+          const labelLower = label.toLowerCase();
+          // Check if it's already a label_id
+          if (labelMap.has(label)) return label;
+          // Try to match by name
+          if (labelNameToIdMap.has(labelLower)) return labelNameToIdMap.get(labelLower);
+          // Try partial match
+          for (const [name, id] of labelNameToIdMap.entries()) {
+            if (name.includes(labelLower) || labelLower.includes(name)) {
+              return id;
+            }
+          }
+          return label; // Return as-is if not found (will filter out later)
+        }).filter(id => labelMap.has(id!));
+
+        if (targetLabelIds.length === 0) {
+          return {
+            success: false,
+            message: `No matching labels found for: ${params.labels.join(', ')}. Available labels: ${Array.from(labelMap.values()).map((l: any) => l.name).join(', ')}`,
+          };
+        }
+
+        // Get label info for response
+        const labelInfo = targetLabelIds.map(id => {
+          const label = labelMap.get(id);
+          return {
+            label_id: id,
+            name: label?.name,
+            color: label?.color,
+            icon: label?.icon,
+          };
+        });
+
+        // Map entities to their areas and labels
+        entities.forEach((entity: any) => {
+          // Map area
+          if (entity.area_id) {
+            entityAreaMap.set(entity.entity_id, entity.area_id);
+          } else if (entity.device_id) {
+            const device = deviceMap.get(entity.device_id);
+            if (device?.area_id) {
+              entityAreaMap.set(entity.entity_id, device.area_id);
+            }
+          }
+
+          // Map labels (from entity or device)
+          const entityLabelSet = new Set<string>();
+          if (entity.labels && Array.isArray(entity.labels)) {
+            entity.labels.forEach((lbl: string) => entityLabelSet.add(lbl));
+          }
+          if (entity.device_id) {
+            const device = deviceMap.get(entity.device_id);
+            if (device?.labels && Array.isArray(device.labels)) {
+              device.labels.forEach((lbl: string) => entityLabelSet.add(lbl));
+            }
+          }
+          entityLabelsMap.set(entity.entity_id, Array.from(entityLabelSet));
+        });
+
+        // Filter devices by labels
+        let filteredDevices = states.filter((device: any) => {
+          const deviceLabels = entityLabelsMap.get(device.entity_id) || [];
+          
+          if (params.include_unlabeled && deviceLabels.length === 0) {
+            return true;
+          }
+
+          if (params.match_all) {
+            // AND logic: device must have ALL target labels
+            return targetLabelIds.every(labelId => deviceLabels.includes(labelId));
+          } else {
+            // OR logic: device must have ANY target label
+            return targetLabelIds.some(labelId => deviceLabels.includes(labelId));
+          }
+        });
+
+        // Apply additional filters
+        if (params.domain) {
+          filteredDevices = filteredDevices.filter((device: any) => 
+            device.entity_id.startsWith(`${params.domain}.`)
+          );
+        }
+
+        if (params.device_class) {
+          filteredDevices = filteredDevices.filter((device: any) => 
+            device.attributes?.device_class === params.device_class
+          );
+        }
+
+        if (params.state) {
+          filteredDevices = filteredDevices.filter((device: any) => 
+            device.state.toLowerCase() === params.state!.toLowerCase()
+          );
+        }
+
+        if (params.area) {
+          const areaQuery = params.area.toLowerCase();
+          filteredDevices = filteredDevices.filter((device: any) => {
+            const entityAreaId = entityAreaMap.get(device.entity_id);
+            if (!entityAreaId) return false;
+            
+            const area = areaMap.get(entityAreaId);
+            if (!area) return false;
+            
+            return area.area_id.toLowerCase().includes(areaQuery) ||
+                   area.name.toLowerCase().includes(areaQuery) ||
+                   (area.aliases && area.aliases.some((alias: string) => 
+                     alias.toLowerCase().includes(areaQuery)
+                   ));
+          });
+        }
+
+        // Calculate total before pagination
+        const totalFound = filteredDevices.length;
+        
+        // Apply pagination
+        const offset = params.offset || 0;
+        const limit = params.limit || 100;
+        const paginatedDevices = filteredDevices.slice(offset, offset + limit);
+
+        // Format response
+        const results = paginatedDevices.map((device: any) => {
+          const entityAreaId = entityAreaMap.get(device.entity_id);
+          const area = entityAreaId ? areaMap.get(entityAreaId) : null;
+          const deviceLabels = entityLabelsMap.get(device.entity_id) || [];
+          
+          const baseInfo: any = {
+            entity_id: device.entity_id,
+            state: device.state,
+            friendly_name: device.attributes?.friendly_name || device.entity_id,
+            domain: device.entity_id.split('.')[0],
+            device_class: device.attributes?.device_class,
+            last_changed: device.last_changed,
+            last_updated: device.last_updated,
+            labels: deviceLabels,
+            label_names: deviceLabels.map((lbl: string) => labelMap.get(lbl)?.name).filter(Boolean),
+          };
+
+          if (params.include_area_info !== false && area) {
+            baseInfo.area = {
+              area_id: area.area_id,
+              name: area.name,
+              floor_id: area.floor_id,
+              icon: area.icon,
+            };
+          }
+
+          if (params.include_attributes) {
+            baseInfo.attributes = device.attributes;
+          }
+
+          return baseInfo;
+        });
+
+        return {
+          success: true,
+          total_found: totalFound,
+          returned: results.length,
+          offset: offset,
+          limit: limit,
+          has_more: totalFound > (offset + limit),
+          label_info: labelInfo,
+          devices: results,
+          filters_applied: {
+            labels: params.labels,
+            match_all: params.match_all ?? false,
+            include_unlabeled: params.include_unlabeled ?? false,
+            domain: params.domain,
+            device_class: params.device_class,
+            area: params.area,
+            state: params.state,
+            include_area_info: params.include_area_info ?? true,
+          },
+          metadata: {
+            resolved_label_ids: targetLabelIds,
+            total_labels_searched: targetLabelIds.length,
+          },
+          search_method: 'websocket_label_filter',
+        };
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+      }
+    }
+  };
+  registerTool(searchDevicesByLabelTool);
 
   // Add comprehensive template sensor management tool
   const templateSensorTool = {
