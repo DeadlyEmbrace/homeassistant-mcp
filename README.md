@@ -114,6 +114,20 @@ See [SSE_API.md](docs/SSE_API.md) for complete documentation of the SSE system.
   - Version control and updates
   - Repository management
 
+- **Helper Management** ⭐ NEW
+  - Create, update, delete, and list all helper types:
+    - **input_boolean**: Toggle switches for binary states
+    - **input_number**: Numeric input with sliders or text boxes
+    - **input_text**: Text input fields with validation
+    - **input_select**: Dropdown menus with custom options
+    - **input_datetime**: Date and/or time pickers
+    - **counter**: Increment/decrement counters
+    - **timer**: Countdown timers
+  - Full CRUD operations through unified `manage_helpers` tool
+  - Filter and search by helper type
+  - Comprehensive parameter support for all helper types
+  - See [HELPER_MANAGEMENT.md](HELPER_MANAGEMENT.md) for complete documentation
+
 - **Automation Management**
   - Create and edit automations
   - Advanced configuration options:

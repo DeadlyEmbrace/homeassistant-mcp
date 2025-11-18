@@ -3162,6 +3162,417 @@ async function main() {
 
   registerTool(templateSensorTool);
 
+  // Add comprehensive helper management tool
+  const manageHelpersTool = {
+    name: 'manage_helpers',
+    description: 'Create, update, delete, and list Home Assistant helpers (input_boolean, input_number, input_text, input_select, input_datetime, counter, timer)',
+    parameters: z.object({
+      action: z.enum(['create', 'update', 'delete', 'list', 'get'])
+        .describe('Action to perform: create new helper, update existing, delete, list all, or get specific helper'),
+      helper_type: z.enum(['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer']).optional()
+        .describe('Type of helper (required for create, optional filter for list)'),
+      
+      // Common fields
+      name: z.string().optional()
+        .describe('Display name for the helper (required for create)'),
+      entity_id: z.string().optional()
+        .describe('Entity ID (required for update/delete/get, auto-generated for create from name)'),
+      icon: z.string().optional()
+        .describe('MDI icon (e.g., mdi:toggle-switch, mdi:numeric)'),
+      
+      // input_boolean specific
+      initial: z.boolean().optional()
+        .describe('Initial state for input_boolean (true/false)'),
+      
+      // input_number specific
+      min: z.number().optional()
+        .describe('Minimum value for input_number'),
+      max: z.number().optional()
+        .describe('Maximum value for input_number'),
+      step: z.number().optional()
+        .describe('Step increment for input_number (default: 1)'),
+      mode: z.enum(['box', 'slider']).optional()
+        .describe('Display mode for input_number'),
+      unit_of_measurement: z.string().optional()
+        .describe('Unit for input_number (e.g., °C, %, minutes)'),
+      
+      // input_text specific
+      min_length: z.number().optional()
+        .describe('Minimum length for input_text (default: 0)'),
+      max_length: z.number().optional()
+        .describe('Maximum length for input_text (default: 100)'),
+      pattern: z.string().optional()
+        .describe('Regex pattern for input_text validation'),
+      text_mode: z.enum(['text', 'password']).optional()
+        .describe('Display mode for input_text'),
+      
+      // input_select specific
+      options: z.array(z.string()).optional()
+        .describe('List of options for input_select (required for input_select)'),
+      
+      // input_datetime specific
+      has_date: z.boolean().optional()
+        .describe('Include date picker for input_datetime'),
+      has_time: z.boolean().optional()
+        .describe('Include time picker for input_datetime'),
+      
+      // counter specific
+      counter_initial: z.number().optional()
+        .describe('Initial value for counter (default: 0)'),
+      counter_step: z.number().optional()
+        .describe('Step increment for counter (default: 1)'),
+      counter_minimum: z.number().optional()
+        .describe('Minimum value for counter'),
+      counter_maximum: z.number().optional()
+        .describe('Maximum value for counter'),
+      counter_restore: z.boolean().optional()
+        .describe('Restore counter value after restart'),
+      
+      // timer specific
+      duration: z.string().optional()
+        .describe('Duration for timer in HH:MM:SS format (required for timer)'),
+      timer_restore: z.boolean().optional()
+        .describe('Restore timer state after restart'),
+    }),
+    execute: async (params: {
+      action: 'create' | 'update' | 'delete' | 'list' | 'get';
+      helper_type?: 'input_boolean' | 'input_number' | 'input_text' | 'input_select' | 'input_datetime' | 'counter' | 'timer';
+      name?: string;
+      entity_id?: string;
+      icon?: string;
+      initial?: boolean;
+      min?: number;
+      max?: number;
+      step?: number;
+      mode?: 'box' | 'slider';
+      unit_of_measurement?: string;
+      min_length?: number;
+      max_length?: number;
+      pattern?: string;
+      text_mode?: 'text' | 'password';
+      options?: string[];
+      has_date?: boolean;
+      has_time?: boolean;
+      counter_initial?: number;
+      counter_step?: number;
+      counter_minimum?: number;
+      counter_maximum?: number;
+      counter_restore?: boolean;
+      duration?: string;
+      timer_restore?: boolean;
+    }) => {
+      try {
+        if (!wsClient) {
+          throw new Error('WebSocket client not available');
+        }
+
+        switch (params.action) {
+          case 'list': {
+            // Get all helpers
+            const allStates = await wsClient.callWS({ type: 'get_states' });
+            
+            if (!Array.isArray(allStates)) {
+              throw new Error('Invalid response from get_states');
+            }
+
+            // Filter for helper entities
+            const helperDomains = ['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer'];
+            let helpers = allStates.filter((entity: any) => {
+              const domain = entity.entity_id.split('.')[0];
+              return helperDomains.includes(domain);
+            });
+
+            // Filter by type if specified
+            if (params.helper_type) {
+              helpers = helpers.filter((entity: any) => 
+                entity.entity_id.startsWith(`${params.helper_type}.`)
+              );
+            }
+
+            // Format helper information
+            const helperList = helpers.map((entity: any) => ({
+              entity_id: entity.entity_id,
+              name: entity.attributes?.friendly_name || entity.entity_id,
+              type: entity.entity_id.split('.')[0],
+              state: entity.state,
+              icon: entity.attributes?.icon,
+              ...( entity.attributes?.min !== undefined && { min: entity.attributes.min }),
+              ...( entity.attributes?.max !== undefined && { max: entity.attributes.max }),
+              ...( entity.attributes?.step !== undefined && { step: entity.attributes.step }),
+              ...( entity.attributes?.mode !== undefined && { mode: entity.attributes.mode }),
+              ...( entity.attributes?.unit_of_measurement !== undefined && { unit_of_measurement: entity.attributes.unit_of_measurement }),
+              ...( entity.attributes?.options !== undefined && { options: entity.attributes.options }),
+              ...( entity.attributes?.has_date !== undefined && { has_date: entity.attributes.has_date }),
+              ...( entity.attributes?.has_time !== undefined && { has_time: entity.attributes.has_time }),
+              last_changed: entity.last_changed,
+            }));
+
+            // Group by type
+            const helpersByType: Record<string, any[]> = {};
+            helperList.forEach(helper => {
+              if (!helpersByType[helper.type]) {
+                helpersByType[helper.type] = [];
+              }
+              helpersByType[helper.type].push(helper);
+            });
+
+            return {
+              success: true,
+              total_helpers: helperList.length,
+              helpers: helperList,
+              helpers_by_type: helpersByType,
+              filter_applied: params.helper_type || 'all',
+            };
+          }
+
+          case 'get': {
+            if (!params.entity_id) {
+              throw new Error('entity_id is required for get action');
+            }
+
+            const state = await wsClient.callWS({
+              type: 'call_service',
+              domain: 'homeassistant',
+              service: 'update_entity',
+              service_data: {
+                entity_id: params.entity_id
+              }
+            }).catch(async () => {
+              // Fallback to get_states
+              const allStates = await wsClient.callWS({ type: 'get_states' });
+              return allStates.find((s: any) => s.entity_id === params.entity_id);
+            });
+
+            if (!state) {
+              return {
+                success: false,
+                message: `Helper '${params.entity_id}' not found`,
+                entity_id: params.entity_id,
+              };
+            }
+
+            return {
+              success: true,
+              helper: {
+                entity_id: params.entity_id,
+                type: params.entity_id.split('.')[0],
+                name: state.attributes?.friendly_name || params.entity_id,
+                state: state.state,
+                attributes: state.attributes,
+                last_changed: state.last_changed,
+                last_updated: state.last_updated,
+              },
+            };
+          }
+
+          case 'create': {
+            if (!params.helper_type) {
+              throw new Error('helper_type is required for create action');
+            }
+            if (!params.name) {
+              throw new Error('name is required for create action');
+            }
+
+            let serviceData: any = {
+              name: params.name,
+            };
+
+            if (params.icon) {
+              serviceData.icon = params.icon;
+            }
+
+            // Type-specific configurations
+            switch (params.helper_type) {
+              case 'input_boolean':
+                if (params.initial !== undefined) {
+                  serviceData.initial = params.initial;
+                }
+                break;
+
+              case 'input_number':
+                if (params.min !== undefined) serviceData.min = params.min;
+                if (params.max !== undefined) serviceData.max = params.max;
+                if (params.step !== undefined) serviceData.step = params.step;
+                if (params.mode) serviceData.mode = params.mode;
+                if (params.unit_of_measurement) serviceData.unit_of_measurement = params.unit_of_measurement;
+                if (params.initial !== undefined) serviceData.initial = params.min || 0;
+                break;
+
+              case 'input_text':
+                if (params.min_length !== undefined) serviceData.min = params.min_length;
+                if (params.max_length !== undefined) serviceData.max = params.max_length;
+                if (params.pattern) serviceData.pattern = params.pattern;
+                if (params.text_mode) serviceData.mode = params.text_mode;
+                serviceData.initial = '';
+                break;
+
+              case 'input_select':
+                if (!params.options || params.options.length === 0) {
+                  throw new Error('options are required for input_select');
+                }
+                serviceData.options = params.options;
+                serviceData.initial = params.options[0];
+                break;
+
+              case 'input_datetime':
+                serviceData.has_date = params.has_date !== false;
+                serviceData.has_time = params.has_time !== false;
+                break;
+
+              case 'counter':
+                if (params.counter_initial !== undefined) serviceData.initial = params.counter_initial;
+                if (params.counter_step !== undefined) serviceData.step = params.counter_step;
+                if (params.counter_minimum !== undefined) serviceData.minimum = params.counter_minimum;
+                if (params.counter_maximum !== undefined) serviceData.maximum = params.counter_maximum;
+                if (params.counter_restore !== undefined) serviceData.restore = params.counter_restore;
+                break;
+
+              case 'timer':
+                if (!params.duration) {
+                  throw new Error('duration is required for timer (format: HH:MM:SS)');
+                }
+                serviceData.duration = params.duration;
+                if (params.timer_restore !== undefined) serviceData.restore = params.timer_restore;
+                break;
+            }
+
+            // Call the appropriate service to create the helper
+            const result = await wsClient.callWS({
+              type: 'call_service',
+              domain: params.helper_type,
+              service: 'create',
+              service_data: serviceData,
+              return_response: true
+            });
+
+            // Generate entity_id from name if not provided in result
+            const generatedEntityId = `${params.helper_type}.${params.name.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+
+            return {
+              success: true,
+              message: `Successfully created ${params.helper_type} helper`,
+              helper_type: params.helper_type,
+              entity_id: result?.entity_id || generatedEntityId,
+              name: params.name,
+              configuration: serviceData,
+            };
+          }
+
+          case 'update': {
+            if (!params.entity_id) {
+              throw new Error('entity_id is required for update action');
+            }
+
+            const helperType = params.entity_id.split('.')[0];
+            
+            let serviceData: any = {
+              entity_id: params.entity_id,
+            };
+
+            // Add updateable fields
+            if (params.name) serviceData.name = params.name;
+            if (params.icon) serviceData.icon = params.icon;
+
+            // Type-specific updates
+            switch (helperType) {
+              case 'input_number':
+                if (params.min !== undefined) serviceData.min = params.min;
+                if (params.max !== undefined) serviceData.max = params.max;
+                if (params.step !== undefined) serviceData.step = params.step;
+                if (params.mode) serviceData.mode = params.mode;
+                if (params.unit_of_measurement) serviceData.unit_of_measurement = params.unit_of_measurement;
+                break;
+
+              case 'input_text':
+                if (params.min_length !== undefined) serviceData.min = params.min_length;
+                if (params.max_length !== undefined) serviceData.max = params.max_length;
+                if (params.pattern) serviceData.pattern = params.pattern;
+                if (params.text_mode) serviceData.mode = params.text_mode;
+                break;
+
+              case 'input_select':
+                if (params.options) serviceData.options = params.options;
+                break;
+
+              case 'input_datetime':
+                if (params.has_date !== undefined) serviceData.has_date = params.has_date;
+                if (params.has_time !== undefined) serviceData.has_time = params.has_time;
+                break;
+
+              case 'counter':
+                if (params.counter_step !== undefined) serviceData.step = params.counter_step;
+                if (params.counter_minimum !== undefined) serviceData.minimum = params.counter_minimum;
+                if (params.counter_maximum !== undefined) serviceData.maximum = params.counter_maximum;
+                if (params.counter_restore !== undefined) serviceData.restore = params.counter_restore;
+                break;
+
+              case 'timer':
+                if (params.duration) serviceData.duration = params.duration;
+                if (params.timer_restore !== undefined) serviceData.restore = params.timer_restore;
+                break;
+            }
+
+            // Call update service
+            await wsClient.callWS({
+              type: 'call_service',
+              domain: helperType,
+              service: 'update',
+              service_data: serviceData
+            });
+
+            return {
+              success: true,
+              message: `Successfully updated ${helperType} helper`,
+              entity_id: params.entity_id,
+              updated_fields: Object.keys(serviceData).filter(k => k !== 'entity_id'),
+            };
+          }
+
+          case 'delete': {
+            if (!params.entity_id) {
+              throw new Error('entity_id is required for delete action');
+            }
+
+            const helperType = params.entity_id.split('.')[0];
+            const helperDomains = ['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer'];
+            
+            if (!helperDomains.includes(helperType)) {
+              throw new Error(`Entity '${params.entity_id}' is not a helper. Only helpers can be deleted via this tool.`);
+            }
+
+            // Call delete/remove service
+            await wsClient.callWS({
+              type: 'call_service',
+              domain: helperType,
+              service: 'remove',
+              service_data: {
+                entity_id: params.entity_id
+              }
+            });
+
+            return {
+              success: true,
+              message: `Successfully deleted ${helperType} helper`,
+              entity_id: params.entity_id,
+            };
+          }
+
+          default:
+            throw new Error(`Unknown action: ${params.action}`);
+        }
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unknown error occurred',
+          action: params.action,
+          helper_type: params.helper_type,
+          entity_id: params.entity_id,
+        };
+      }
+    }
+  };
+  registerTool(manageHelpersTool);
+
   // Add the device details tool
   const deviceDetailsTool = {
     name: 'get_device_details',
