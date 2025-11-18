@@ -3165,11 +3165,11 @@ async function main() {
   // Add comprehensive helper management tool
   const manageHelpersTool = {
     name: 'manage_helpers',
-    description: 'Create, update, delete, and list Home Assistant helpers (input_boolean, input_number, input_text, input_select, input_datetime, counter, timer)',
+    description: 'Create, update, delete, and list Home Assistant helpers (input_boolean, input_number, input_text, input_select, input_datetime, counter, timer, group)',
     parameters: z.object({
       action: z.enum(['create', 'update', 'delete', 'list', 'get'])
         .describe('Action to perform: create new helper, update existing, delete, list all, or get specific helper'),
-      helper_type: z.enum(['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer']).optional()
+      helper_type: z.enum(['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer', 'group']).optional()
         .describe('Type of helper (required for create, optional filter for list)'),
       
       // Common fields
@@ -3233,10 +3233,16 @@ async function main() {
         .describe('Duration for timer in HH:MM:SS format (required for timer)'),
       timer_restore: z.boolean().optional()
         .describe('Restore timer state after restart'),
+      
+      // group specific
+      entities: z.array(z.string()).optional()
+        .describe('List of entity IDs to include in the group (required for group)'),
+      all: z.boolean().optional()
+        .describe('Whether all entities must be on for group to be on (default: false)'),
     }),
     execute: async (params: {
       action: 'create' | 'update' | 'delete' | 'list' | 'get';
-      helper_type?: 'input_boolean' | 'input_number' | 'input_text' | 'input_select' | 'input_datetime' | 'counter' | 'timer';
+      helper_type?: 'input_boolean' | 'input_number' | 'input_text' | 'input_select' | 'input_datetime' | 'counter' | 'timer' | 'group';
       name?: string;
       entity_id?: string;
       icon?: string;
@@ -3260,6 +3266,8 @@ async function main() {
       counter_restore?: boolean;
       duration?: string;
       timer_restore?: boolean;
+      entities?: string[];
+      all?: boolean;
     }) => {
       try {
         if (!wsClient) {
@@ -3276,7 +3284,7 @@ async function main() {
             }
 
             // Filter for helper entities
-            const helperDomains = ['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer'];
+            const helperDomains = ['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer', 'group'];
             let helpers = allStates.filter((entity: any) => {
               const domain = entity.entity_id.split('.')[0];
               return helperDomains.includes(domain);
@@ -3434,6 +3442,14 @@ async function main() {
                 serviceData.duration = params.duration;
                 if (params.timer_restore !== undefined) serviceData.restore = params.timer_restore;
                 break;
+
+              case 'group':
+                if (!params.entities || params.entities.length === 0) {
+                  throw new Error('entities array is required for group and must contain at least one entity');
+                }
+                serviceData.entities = params.entities;
+                if (params.all !== undefined) serviceData.all = params.all;
+                break;
             }
 
             // Call the appropriate service to create the helper
@@ -3510,6 +3526,11 @@ async function main() {
                 if (params.duration) serviceData.duration = params.duration;
                 if (params.timer_restore !== undefined) serviceData.restore = params.timer_restore;
                 break;
+
+              case 'group':
+                if (params.entities) serviceData.entities = params.entities;
+                if (params.all !== undefined) serviceData.all = params.all;
+                break;
             }
 
             // Call update service
@@ -3534,7 +3555,7 @@ async function main() {
             }
 
             const helperType = params.entity_id.split('.')[0];
-            const helperDomains = ['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer'];
+            const helperDomains = ['input_boolean', 'input_number', 'input_text', 'input_select', 'input_datetime', 'counter', 'timer', 'group'];
             
             if (!helperDomains.includes(helperType)) {
               throw new Error(`Entity '${params.entity_id}' is not a helper. Only helpers can be deleted via this tool.`);

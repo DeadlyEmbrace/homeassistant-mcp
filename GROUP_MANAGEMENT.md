@@ -1,240 +1,278 @@
 # Group Management via MCP
 
-Complete guide for creating and managing Home Assistant groups using the new `call_service` tool.
+Complete guide for creating and managing Home Assistant groups using the MCP.
 
 ## Overview
 
-The `call_service` tool provides access to any Home Assistant service, including group management. This allows you to:
-- Create groups of entities dynamically
-- Update existing groups
-- Remove groups
-- Call any other Home Assistant service
+There are **two methods** to create groups in Home Assistant via MCP:
 
-## Creating Groups
+1. **✅ RECOMMENDED: Group Helper** (`manage_helpers` tool) - Creates UI-manageable groups with proper registry entries
+2. **⚠️ Legacy: Group Service** (`call_service` tool) - Creates legacy groups without UI management
 
-### 1. Generic Entity Group
+## ✅ Recommended Method: Group Helper
 
-Create a group containing any mix of entity types:
+### Why Use Group Helpers?
+
+- **UI Integration**: Appears in Home Assistant UI with full management capabilities
+- **Registry Entry**: Proper entity registry entry with unique ID
+- **Editable**: Can be edited through Settings → Devices & Services → Helpers
+- **Modern**: Uses the official Group integration introduced in recent HA versions
+- **Persistent**: Survives restarts and configuration reloads
+
+### Creating a Group Helper
+
+Use the `manage_helpers` tool with `helper_type: "group"`:
+
+```json
+{
+  "action": "create",
+  "helper_type": "group",
+  "name": "Office Environmental Sensors",
+  "icon": "mdi:home-analytics",
+  "entities": [
+    "sensor.airthings_tern_co2_014764_illuminance",
+    "sensor.hue_office_illuminance_2",
+    "sensor.presence_sensor_fp2_9f5a_light_sensor_light_level",
+    "sensor.airthings_tern_co2_014764_temperature",
+    "sensor.hue_office_temperature_2"
+  ]
+}
+```
+
+This creates `group.office_environmental_sensors` that:
+- ✅ Appears in UI under Settings → Devices & Services → Helpers
+- ✅ Can be edited/deleted from the UI
+- ✅ Has a proper entity registry entry
+- ✅ Shows entity count and state aggregation
+
+### Group Helper Parameters
+
+**Required:**
+- `action`: "create"
+- `helper_type`: "group"  
+- `name`: Display name
+- `entities`: Array of entity IDs (minimum 1)
+
+**Optional:**
+- `icon`: MDI icon (e.g., "mdi:group", "mdi:home-analytics")
+- `all`: Boolean (default: false)
+  - `false`: Group is "on" if **any** member is "on" (OR logic)
+  - `true`: Group is "on" only if **all** members are "on" (AND logic)
+
+### Examples
+
+#### 1. Temperature Sensor Group
+```json
+{
+  "action": "create",
+  "helper_type": "group",
+  "name": "All Temperature Sensors",
+  "icon": "mdi:thermometer",
+  "entities": [
+    "sensor.living_room_temperature",
+    "sensor.bedroom_temperature",
+    "sensor.kitchen_temperature",
+    "sensor.office_temperature"
+  ]
+}
+```
+
+#### 2. Motion Sensor Group (Any Motion)
+```json
+{
+  "action": "create",
+  "helper_type": "group",
+  "name": "All Motion Sensors",
+  "icon": "mdi:motion-sensor",
+  "entities": [
+    "binary_sensor.living_room_motion",
+    "binary_sensor.hallway_motion",
+    "binary_sensor.office_motion"
+  ],
+  "all": false
+}
+```
+
+**Result**: Group is "on" if ANY motion sensor detects motion
+
+#### 3. Security Sensors Group (All Must Be On)
+```json
+{
+  "action": "create",
+  "helper_type": "group",
+  "name": "All Doors Closed",
+  "icon": "mdi:door-closed-lock",
+  "entities": [
+    "binary_sensor.front_door",
+    "binary_sensor.back_door",
+    "binary_sensor.garage_door"
+  ],
+  "all": true
+}
+```
+
+**Result**: Group is "on" only if ALL doors are closed (on state)
+
+### Updating Group Helpers
+
+```json
+{
+  "action": "update",
+  "entity_id": "group.office_environmental_sensors",
+  "name": "Office Sensors (Updated)",
+  "entities": [
+    "sensor.airthings_tern_co2_014764_illuminance",
+    "sensor.hue_office_illuminance_2",
+    "sensor.presence_sensor_fp2_9f5a_light_sensor_light_level",
+    "sensor.airthings_tern_co2_014764_temperature",
+    "sensor.hue_office_temperature_2",
+    "sensor.office_humidity"
+  ],
+  "all": false
+}
+```
+
+### Listing Group Helpers
+
+```json
+{
+  "action": "list",
+  "helper_type": "group"
+}
+```
+
+### Deleting Group Helpers
+
+```json
+{
+  "action": "delete",
+  "entity_id": "group.office_environmental_sensors"
+}
+```
+
+## ⚠️ Legacy Method: Group Service (Not Recommended)
+
+The `call_service` tool with `group.set` creates legacy groups that **do not appear properly in the UI**:
 
 ```json
 {
   "domain": "group",
   "service": "set",
   "service_data": {
-    "object_id": "office_environmental_sensors",
-    "name": "Office Environmental Sensors",
-    "entities": [
-      "sensor.airthings_tern_co2_014764_illuminance",
-      "sensor.hue_office_illuminance_2",
-      "sensor.presence_sensor_fp2_9f5a_light_sensor_light_level",
-      "sensor.airthings_tern_co2_014764_temperature",
-      "sensor.hue_office_temperature_2"
-    ]
+    "object_id": "office_sensors",
+    "name": "Office Sensors",
+    "entities": ["sensor.1", "sensor.2"]
   }
 }
 ```
 
-This creates `group.office_environmental_sensors` containing all specified sensors.
+**Limitations:**
+- ❌ No UI management - invisible in Settings → Helpers
+- ❌ No entity registry entry - no unique ID
+- ❌ Can't be edited through UI
+- ❌ May disappear on restart
+- ❌ Legacy method, being phased out
 
-### 2. Light Group
+**Only use this if:**
+- You need temporary, programmatic groups
+- You're maintaining old automations
+- You specifically need legacy group behavior
 
-Create a group specifically for lights (supports combined control):
+## Comparison Table
 
+| Feature | Group Helper | Legacy Group Service |
+|---------|--------------|---------------------|
+| **UI Visible** | ✅ Yes | ❌ No |
+| **Editable in UI** | ✅ Yes | ❌ No |
+| **Registry Entry** | ✅ Yes | ❌ No |
+| **Unique ID** | ✅ Yes | ❌ No |
+| **Persistent** | ✅ Yes | ⚠️ Sometimes |
+| **Modern** | ✅ Yes | ❌ Legacy |
+| **Tool** | `manage_helpers` | `call_service` |
+| **Recommended** | ✅ Yes | ❌ No |
+
+## Group State Logic
+
+### OR Logic (default: `all: false`)
+Group state is "on" if **any** member entity is "on":
+- **Use for**: Motion sensors, door sensors, lights
+- **Example**: Any motion detected, any door open, any light on
+
+### AND Logic (`all: true`)
+Group state is "on" only if **all** member entities are "on":
+- **Use for**: Security checks, complete states
+- **Example**: All doors closed, all lights on, all sensors active
+
+## Common Use Cases
+
+### 1. Environmental Monitoring
 ```json
 {
-  "domain": "light",
-  "service": "group",
-  "service_data": {
-    "name": "All Downstairs Lights",
-    "entities": [
-      "light.living_room",
-      "light.kitchen",
-      "light.dining_room",
-      "light.hallway"
-    ]
-  }
+  "action": "create",
+  "helper_type": "group",
+  "name": "Living Room Environment",
+  "icon": "mdi:home-analytics",
+  "entities": [
+    "sensor.living_room_temperature",
+    "sensor.living_room_humidity",
+    "sensor.living_room_co2",
+    "sensor.living_room_illuminance"
+  ]
 }
 ```
 
-Light groups can be controlled as a single entity (brightness, color, etc.).
-
-### 3. Switch Group
-
-Group switches for simultaneous control:
-
+### 2. Security System
 ```json
 {
-  "domain": "switch",
-  "service": "group",
-  "service_data": {
-    "name": "All Fans",
-    "entities": [
-      "switch.ceiling_fan_living_room",
-      "switch.ceiling_fan_bedroom",
-      "switch.tower_fan_office"
-    ]
-  }
+  "action": "create",
+  "helper_type": "group",
+  "name": "Security Sensors",
+  "icon": "mdi:shield-home",
+  "entities": [
+    "binary_sensor.front_door",
+    "binary_sensor.back_door",
+    "binary_sensor.window_sensor_1",
+    "binary_sensor.window_sensor_2",
+    "binary_sensor.garage_door"
+  ],
+  "all": false
 }
 ```
 
-### 4. Cover Group
-
-Group covers/blinds for synchronized operation:
-
+### 3. Climate Control
 ```json
 {
-  "domain": "cover",
-  "service": "group",
-  "service_data": {
-    "name": "All Window Blinds",
-    "entities": [
-      "cover.living_room_blind",
-      "cover.bedroom_blind",
-      "cover.office_blind"
-    ]
-  }
+  "action": "create",
+  "helper_type": "group",
+  "name": "All Thermostats",
+  "icon": "mdi:thermostat",
+  "entities": [
+    "climate.living_room",
+    "climate.bedroom",
+    "climate.office"
+  ]
 }
 ```
 
-## Updating Groups
-
-To update an existing group, simply call `group.set` again with the same `object_id`:
-
+### 4. Lighting Zones
 ```json
 {
-  "domain": "group",
-  "service": "set",
-  "service_data": {
-    "object_id": "office_environmental_sensors",
-    "name": "Office Environmental Sensors (Updated)",
-    "entities": [
-      "sensor.airthings_tern_co2_014764_illuminance",
-      "sensor.hue_office_illuminance_2",
-      "sensor.presence_sensor_fp2_9f5a_light_sensor_light_level",
-      "sensor.airthings_tern_co2_014764_temperature",
-      "sensor.hue_office_temperature_2",
-      "sensor.office_humidity"
-    ]
-  }
-}
-```
-
-## Removing Groups
-
-To remove a group, use the `group.remove` service:
-
-```json
-{
-  "domain": "group",
-  "service": "remove",
-  "service_data": {
-    "object_id": "office_environmental_sensors"
-  }
-}
-```
-
-## Group Types & Features
-
-### Generic Groups (`group.set`)
-- **Entities:** Any entity types
-- **State:** Shows count of "on" entities
-- **Control:** Limited to viewing
-- **Use Case:** Organizing related entities
-
-### Domain-Specific Groups
-- **Light Groups:** Full brightness, color control
-- **Switch Groups:** On/off for all switches
-- **Cover Groups:** Position control for all covers
-- **Fan Groups:** Speed control for all fans
-
-## Advanced Usage
-
-### Using Targets
-
-You can use the `target` field to specify entities, devices, or areas:
-
-```json
-{
-  "domain": "light",
-  "service": "turn_on",
-  "target": {
-    "area_id": "living_room"
-  },
-  "service_data": {
-    "brightness": 128
-  }
-}
-```
-
-### Getting Service Response
-
-Set `return_response: true` to get data back from the service:
-
-```json
-{
-  "domain": "homeassistant",
-  "service": "get_config",
-  "return_response": true
-}
-```
-
-## Common Group Patterns
-
-### 1. Temperature Sensors by Area
-```json
-{
-  "domain": "group",
-  "service": "set",
-  "service_data": {
-    "object_id": "all_temperature_sensors",
-    "name": "All Temperature Sensors",
-    "entities": [
-      "sensor.living_room_temperature",
-      "sensor.bedroom_temperature",
-      "sensor.kitchen_temperature",
-      "sensor.office_temperature"
-    ]
-  }
-}
-```
-
-### 2. Motion Sensors
-```json
-{
-  "domain": "group",
-  "service": "set",
-  "service_data": {
-    "object_id": "all_motion_sensors",
-    "name": "All Motion Sensors",
-    "entities": [
-      "binary_sensor.living_room_motion",
-      "binary_sensor.hallway_motion",
-      "binary_sensor.office_motion"
-    ]
-  }
-}
-```
-
-### 3. Door Sensors
-```json
-{
-  "domain": "group",
-  "service": "set",
-  "service_data": {
-    "object_id": "all_door_sensors",
-    "name": "All Doors",
-    "entities": [
-      "binary_sensor.front_door",
-      "binary_sensor.back_door",
-      "binary_sensor.garage_door"
-    ]
-  }
+  "action": "create",
+  "helper_type": "group",
+  "name": "Downstairs Lights",
+  "icon": "mdi:lightbulb-group",
+  "entities": [
+    "light.living_room",
+    "light.kitchen",
+    "light.dining_room",
+    "light.hallway"
+  ]
 }
 ```
 
 ## Using Groups in Automations
 
-Once created, groups can be used in automations:
+Once created, group helpers work like any other entity:
 
 ```yaml
 trigger:
@@ -247,128 +285,94 @@ action:
       entity_id: light.hallway
 ```
 
-## Checking Group State
+## Troubleshooting
 
-Groups automatically aggregate member states:
-- **Numeric sensors:** Average value
-- **Binary sensors:** "on" if any member is "on"
-- **Switches/Lights:** "on" if any member is "on"
+### Group Not Appearing in UI
 
-## Error Handling
+**Problem**: Created group doesn't show in Settings → Helpers
 
-The `call_service` tool returns detailed error information:
+**Solution**: Make sure you're using `manage_helpers` tool with `helper_type: "group"`, not `call_service` with `group.set`
 
-```json
-{
-  "success": false,
-  "message": "Service not found: group.invalid_service",
-  "domain": "group",
-  "service": "invalid_service",
-  "error_details": "..."
-}
-```
+### Group State Not Updating
+
+**Problem**: Group state doesn't change when member entities change
+
+**Solution**: 
+1. Check all member entities exist and are functioning
+2. Verify entity IDs are correct (no typos)
+3. Wait a few seconds for state propagation
+4. Try recreating the group if issue persists
+
+### Can't Find Group in States
+
+**Problem**: `group.my_group` not found in entity states
+
+**Solution**: Ensure group was created successfully. Check response for entity_id. Use `list` action to verify creation.
+
+### Entity ID Conflict
+
+**Problem**: Error about entity ID already existing
+
+**Solution**: Entity names must be unique. Either:
+1. Delete the existing group first
+2. Choose a different name
+3. Use `update` action to modify existing group
 
 ## Best Practices
 
-1. **Naming:** Use descriptive `object_id` values (snake_case)
-   - Good: `office_environmental_sensors`
-   - Bad: `group1`
+1. **Use Descriptive Names**: Clear names help in UI and automations
+   - Good: "Office Environmental Sensors"
+   - Bad: "group1"
 
-2. **Organization:** Group by function, not just entity type
-   - Good: `security_sensors`, `climate_controls`
-   - Bad: `all_sensors`, `all_switches`
+2. **Choose Appropriate Icons**: Visual identification in UI
+   - Browse: https://pictogrammers.com/library/mdi/
+   - Common: `mdi:group`, `mdi:home-analytics`, `mdi:lightbulb-group`
 
-3. **Maintenance:** Update groups when adding/removing devices
-   - Re-run `group.set` with updated entity list
+3. **Organize by Function**: Group related entities
+   - By room: "Living Room Sensors"
+   - By type: "All Motion Sensors"
+   - By purpose: "Security System"
 
-4. **Documentation:** Use clear `name` values for UI display
-   - The `name` appears in Home Assistant UI
-   - The `object_id` becomes the entity ID
+4. **Use Correct Logic**:
+   - OR (`all: false`): Detection, monitoring (any sensor triggers)
+   - AND (`all: true`): Validation, security (all must match)
 
-## Other Useful Services
+5. **Test After Creation**: Verify group state updates when member entities change
 
-The `call_service` tool can call ANY Home Assistant service:
+## Migration from Legacy Groups
 
-### Reload Automations
-```json
-{
-  "domain": "automation",
-  "service": "reload"
-}
-```
+If you have legacy groups created with `group.set`:
 
-### Execute Script
-```json
-{
-  "domain": "script",
-  "service": "turn_on",
-  "target": {
-    "entity_id": "script.good_morning"
-  }
-}
-```
-
-### Send Notification
-```json
-{
-  "domain": "notify",
-  "service": "mobile_app_iphone",
-  "service_data": {
-    "message": "Motion detected!",
-    "title": "Security Alert"
-  }
-}
-```
-
-### Update Entity
-```json
-{
-  "domain": "homeassistant",
-  "service": "update_entity",
-  "target": {
-    "entity_id": "sensor.my_sensor"
-  }
-}
-```
-
-## Troubleshooting
-
-### Group Not Created
-- Check entity IDs are correct and exist
-- Verify `object_id` follows naming rules (lowercase, underscores)
-- Ensure Home Assistant has write permissions
-
-### Group State Not Updating
-- Groups update automatically when member states change
-- If stuck, try removing and recreating the group
-- Check member entities are functioning correctly
-
-### Can't Control Group
-- For domain-specific control, use domain-specific groups
-- Generic groups (`group.set`) are view-only
-- Use `light.group`, `switch.group`, etc. for controllable groups
+1. **List Current Groups**: Use states API to find legacy groups
+2. **Note Entity Lists**: Record which entities are in each group
+3. **Create Group Helpers**: Use `manage_helpers` to recreate as helpers
+4. **Update Automations**: Point to new group entity IDs (if changed)
+5. **Remove Legacy Groups**: Use `group.remove` service
 
 ## Summary
 
-The `call_service` tool provides:
-- ✅ Full access to Home Assistant service API
-- ✅ Dynamic group creation and management
-- ✅ No configuration file editing required
-- ✅ Immediate effect (no restart needed)
-- ✅ Works with all entity types
-- ✅ Supports advanced targeting (areas, devices)
+- ✅ **Always use `manage_helpers` with `helper_type: "group"`** for new groups
+- ✅ Groups appear in UI and can be managed through Settings → Helpers  
+- ✅ Supports both OR and AND logic via `all` parameter
+- ✅ Works with any entity types (sensors, binary_sensors, lights, etc.)
+- ✅ Persistent across restarts with proper registry entries
+- ❌ Avoid legacy `group.set` service unless specifically needed
 
-For your specific use case, use:
+For your office sensors, use:
 ```json
 {
-  "domain": "group",
-  "service": "set",
-  "service_data": {
-    "object_id": "office_environmental_sensors",
-    "name": "Office Environmental Sensors",
-    "entities": ["sensor.1", "sensor.2", "..."]
-  }
+  "action": "create",
+  "helper_type": "group",
+  "name": "Office Environmental Sensors",
+  "icon": "mdi:home-analytics",
+  "entities": [
+    "sensor.airthings_tern_co2_014764_illuminance",
+    "sensor.hue_office_illuminance_2",
+    "sensor.presence_sensor_fp2_9f5a_light_sensor_light_level",
+    "sensor.airthings_tern_co2_014764_temperature",
+    "sensor.hue_office_temperature_2"
+  ]
 }
 ```
 
-This will create `group.office_environmental_sensors` containing all your specified sensors!
+This creates a properly managed group that will appear in your Home Assistant UI!
